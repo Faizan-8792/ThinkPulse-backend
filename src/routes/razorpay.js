@@ -14,6 +14,7 @@ const {
   createOrder,
   createSingleUseQr,
   fetchQrCode,
+  fetchOrder,
   fetchPayment,
   verifyPaymentSignature,
   verifyWebhookSignature
@@ -66,6 +67,19 @@ function pickUserId(value) {
   }
 
   return "";
+}
+
+/**
+ * Returns true when UPI VPA looks like an actual configured merchant VPA.
+ * @param {string} value
+ * @returns {boolean}
+ */
+function hasRealUpiVpa(value) {
+  const safe = toSafeString(value, 120).toLowerCase();
+  if (!safe) {
+    return false;
+  }
+  return safe !== "your_vpa@upi" && safe !== "yourvpa@upi";
 }
 
 /**
@@ -243,10 +257,10 @@ router.post("/create-qr", async (req, res) => {
     return;
   }
 
-  if (!upiVpa) {
+  if (!hasRealUpiVpa(upiVpa)) {
     res.status(500).json({
       ok: false,
-      error: "UPI VPA is not configured on server. Set RAZORPAY_UPI_VPA in backend env."
+      error: "UPI VPA is not configured on server. Set real RAZORPAY_UPI_VPA in backend env."
     });
     return;
   }
@@ -325,6 +339,74 @@ router.get("/qr-status/:qrId", async (req, res) => {
   const requesterUserId = pickUserId(req.query);
 
   try {
+    const isOrderReference = qrId.startsWith("order_");
+
+    if (isOrderReference) {
+      const order = await fetchOrder(qrId);
+      const orderUserId = pickUserId(order?.notes);
+
+      if (
+        requesterUserId &&
+        orderUserId &&
+        requesterUserId.toLowerCase() !== orderUserId.toLowerCase()
+      ) {
+        res.status(403).json({
+          ok: false,
+          error: "Order does not belong to requested user."
+        });
+        return;
+      }
+
+      const orderStatus = toSafeString(order?.status, 40).toLowerCase() || "created";
+      const amountPaise = Math.max(0, Number(order?.amount) || 0);
+      const amountReceivedPaise = Math.max(0, Number(order?.amount_paid) || 0);
+      const paymentsCountReceived = amountReceivedPaise > 0 ? 1 : 0;
+      const amountInr = resolveAmountInr(null, amountPaise);
+      const paid = Boolean(
+        orderStatus === "paid" &&
+          amountPaise > 0 &&
+          amountReceivedPaise >= amountPaise
+      );
+
+      let persistence = null;
+      if (paid && amountInr) {
+        persistence = await persistPaymentAndPlan({
+          userId: orderUserId || requesterUserId,
+          paymentId: `order_${qrId}`,
+          status: "captured",
+          amountInr,
+          createdAt: order?.created_at
+        });
+      }
+
+      res.json({
+        ok: true,
+        paid,
+        qr: {
+          id: qrId,
+          status: paid ? "closed" : orderStatus,
+          closeBy: 0,
+          closedAt: 0,
+          closeReason: "",
+          amountPaise,
+          amountInr: amountInr || null,
+          amountReceivedPaise,
+          paymentsCountReceived,
+          userId: orderUserId || ""
+        },
+        payment: paid
+          ? {
+              id: `order_${qrId}`,
+              status: "captured",
+              amountInr: amountInr || null,
+              userId: orderUserId || requesterUserId || ""
+            }
+          : null,
+        persistence
+      });
+      return;
+    }
+
     const qr = await fetchQrCode(qrId);
     const qrUserId = pickUserId(qr?.notes);
 

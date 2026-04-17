@@ -192,6 +192,20 @@ async function fetchQrCode(qrId) {
 }
 
 /**
+ * Fetches Razorpay order details by id.
+ * @param {string} orderId
+ * @returns {Promise<any>}
+ */
+async function fetchOrder(orderId) {
+  assertConfigured();
+  const safeOrderId = toSafeNote(orderId);
+  if (!safeOrderId) {
+    throw new Error("orderId is required.");
+  }
+  return razorpayClient.orders.fetch(safeOrderId);
+}
+
+/**
  * Fetches Razorpay payment details.
  * @param {string} paymentId
  * @returns {Promise<any>}
@@ -266,6 +280,7 @@ module.exports = {
   createOrder,
   createSingleUseQr,
   fetchQrCode,
+  fetchOrder,
   fetchPayment,
   verifyPaymentSignature,
   verifyWebhookSignature
