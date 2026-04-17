@@ -90,6 +90,25 @@ function resolveAmountInr(reqAmountInr, paiseAmount) {
 }
 
 /**
+ * Extracts safe provider error details for API responses.
+ * @param {any} error
+ * @returns {{statusCode:number|null,description:string,providerCode:string,providerReason:string}}
+ */
+function extractProviderErrorDetails(error) {
+  const statusCode = Number(error?.statusCode);
+  const safeStatusCode = Number.isInteger(statusCode) && statusCode >= 400 && statusCode < 600
+    ? statusCode
+    : null;
+
+  return {
+    statusCode: safeStatusCode,
+    description: toSafeString(error?.error?.description || error?.message || "", 220),
+    providerCode: toSafeString(error?.error?.code || "", 80),
+    providerReason: toSafeString(error?.error?.reason || "", 120)
+  };
+}
+
+/**
  * Persists paid payment and updates user plan state.
  * @param {{userId:string,paymentId:string,status:string,amountInr:number,createdAt?:number|string|Date}} payload
  * @returns {Promise<{stored:boolean,row?:object,userUpdated?:boolean,userReason?:string}>}
@@ -180,6 +199,17 @@ router.post("/create-order", async (req, res) => {
   }
 });
 
+router.get("/create-qr", (_req, res) => {
+  res.status(405).json({
+    ok: false,
+    error: "Use POST /create-qr with JSON body.",
+    expectedBody: {
+      amount: ALLOWED_AMOUNTS_INR[0],
+      userId: "user@example.com"
+    }
+  });
+});
+
 router.post("/create-qr", async (req, res) => {
   if (!isRazorpayConfigured()) {
     res.status(503).json({
@@ -227,9 +257,17 @@ router.post("/create-qr", async (req, res) => {
       }
     });
   } catch (error) {
-    res.status(500).json({
+    const providerError = extractProviderErrorDetails(error);
+    const responseStatus = providerError.statusCode || 500;
+
+    res.status(responseStatus).json({
       ok: false,
-      error: error?.message || "Unable to create dynamic QR."
+      error: providerError.description || "Unable to create dynamic QR.",
+      providerError: {
+        code: providerError.providerCode || "UNKNOWN",
+        reason: providerError.providerReason || "NA",
+        statusCode: responseStatus
+      }
     });
   }
 });
