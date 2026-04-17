@@ -5,9 +5,16 @@ const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
 const dotenv = require("dotenv");
-const Stripe = require("stripe");
 
 dotenv.config();
+
+const Stripe = require("stripe");
+const {
+  razorpayRouter,
+  razorpayWebhookHandler,
+  getIntegrationState,
+  verifyPaymentsTableAccess
+} = require("./src/routes/razorpay");
 
 const app = express();
 const port = Number(process.env.PORT || 8080);
@@ -27,6 +34,33 @@ if (!stripeSecretKey) {
 const stripe = stripeSecretKey ? new Stripe(stripeSecretKey) : null;
 
 const publicBaseUrl = String(process.env.PUBLIC_BASE_URL || "").trim();
+
+function readEnv(name, fallback = "") {
+  const value = String(process.env[name] || "").trim();
+  return value || fallback;
+}
+
+function parseEnvList(name, maxItems = 50) {
+  const value = readEnv(name, "");
+  if (!value) {
+    return [];
+  }
+
+  const seen = new Set();
+  const out = [];
+  for (const piece of value.split(/\r?\n|,/g)) {
+    const key = String(piece || "").trim();
+    if (!key || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    out.push(key);
+    if (out.length >= maxItems) {
+      break;
+    }
+  }
+  return out;
+}
 
 function resolveUrl(envName, fallbackPath) {
   const explicit = String(process.env[envName] || "").trim();
@@ -48,9 +82,62 @@ const urls = {
   terms: resolveUrl("TERMS_URL", "/terms"),
   privacy: resolveUrl("PRIVACY_URL", "/privacy"),
   refund: resolveUrl("REFUND_POLICY_URL", "/refund-policy"),
-  webhook: resolveUrl("WEBHOOK_URL", "/stripe/webhook"),
+  stripeWebhook: resolveUrl("WEBHOOK_URL", "/stripe/webhook"),
+  razorpayWebhook: resolveUrl("RAZORPAY_WEBHOOK_URL", "/webhook"),
   success: resolveUrl("SUCCESS_URL", "/billing/success"),
   cancel: resolveUrl("CANCEL_URL", "/billing/cancel")
+};
+
+const envBootstrapConfig = {
+  adminPool: {
+    openrouter: parseEnvList("ADMIN_OPENROUTER_KEYS", 30),
+    gemini: parseEnvList("ADMIN_GEMINI_KEYS", 30),
+    deepseek: {
+      key: readEnv("ADMIN_DEEPSEEK_KEY", ""),
+      endpoint: readEnv("ADMIN_DEEPSEEK_ENDPOINT", "https://integrate.api.nvidia.com/v1/chat/completions"),
+      model: readEnv("ADMIN_DEEPSEEK_MODEL", "deepseek-ai/deepseek-v3.2")
+    },
+    qwen: {
+      key: readEnv("ADMIN_QWEN_KEY", ""),
+      endpoint: readEnv("ADMIN_QWEN_ENDPOINT", "https://integrate.api.nvidia.com/v1/chat/completions"),
+      model: readEnv("ADMIN_QWEN_MODEL", "qwen/qwen2.5-coder-7b-instruct")
+    },
+    llamaPrimary: {
+      key: readEnv("ADMIN_LLAMA_PRIMARY_KEY", ""),
+      endpoint: readEnv("ADMIN_LLAMA_PRIMARY_ENDPOINT", "https://integrate.api.nvidia.com/v1/chat/completions"),
+      model: readEnv("ADMIN_LLAMA_PRIMARY_MODEL", "meta/llama-3.1-70b-instruct")
+    },
+    vision: {
+      key: readEnv("ADMIN_VISION_KEY", ""),
+      endpoint: readEnv("ADMIN_VISION_ENDPOINT", "https://integrate.api.nvidia.com/v1/chat/completions"),
+      model: readEnv("ADMIN_VISION_MODEL", "nvidia/nemotron-nano-12b-v2-vl")
+    },
+    imageGen: {
+      key: readEnv("ADMIN_IMAGE_GEN_KEY", ""),
+      endpoint: readEnv("ADMIN_IMAGE_GEN_ENDPOINT", "https://integrate.api.nvidia.com/v1/images/generations"),
+      model: readEnv("ADMIN_IMAGE_GEN_MODEL", "stable-diffusion-3.5-large")
+    },
+    ocr: {
+      ocrspace: {
+        key: readEnv("ADMIN_OCRSPACE_KEY", ""),
+        endpoint: readEnv("ADMIN_OCRSPACE_ENDPOINT", "https://api.ocr.space/parse/image")
+      },
+      nvidia: {
+        key: readEnv("ADMIN_NVIDIA_OCR_KEY", ""),
+        endpoint: readEnv("ADMIN_NVIDIA_OCR_ENDPOINT", "https://integrate.api.nvidia.com/v1/ocr"),
+        model: readEnv("ADMIN_NVIDIA_OCR_MODEL", "nemoretriever-ocr-v1")
+      }
+    },
+    asr: {
+      key: readEnv("ADMIN_ASR_KEY", ""),
+      endpoint: readEnv("ADMIN_ASR_ENDPOINT", "https://integrate.api.nvidia.com/v1/audio/transcriptions"),
+      model: readEnv("ADMIN_ASR_MODEL", "ai-parakeet-ctc-1.1b-asr")
+    }
+  },
+  webSearchDefaults: {
+    tavily: parseEnvList("DEFAULT_TAVILY_SEARCH_KEYS", 30),
+    serper: parseEnvList("DEFAULT_SERPER_SEARCH_KEYS", 30)
+  }
 };
 
 const corsOrigins = String(process.env.CORS_ORIGINS || "")
@@ -72,17 +159,25 @@ app.use(cors({
   }
 }));
 
-app.get("/health", (_req, res) => {
+app.get("/health", async (_req, res) => {
+  const integrationState = getIntegrationState();
+  const paymentsTable = await verifyPaymentsTableAccess();
+
   res.json({
     ok: true,
     service: "thinkpulse-backend",
     mode,
     stripeConfigured: Boolean(stripe),
+    razorpayConfigured: integrationState.razorpayConfigured,
+    supabaseConfigured: integrationState.supabaseConfigured,
+    paymentsTable,
     timestamp: Date.now()
   });
 });
 
 app.get("/config/public", (_req, res) => {
+  const integrationState = getIntegrationState();
+
   const publishableKey = mode === "live"
     ? String(process.env.STRIPE_LIVE_PUBLISHABLE_KEY || "").trim()
     : String(process.env.STRIPE_TEST_PUBLISHABLE_KEY || "").trim();
@@ -91,6 +186,8 @@ app.get("/config/public", (_req, res) => {
     ok: true,
     mode,
     publishableKey,
+    razorpayKeyId: integrationState.razorpayKeyId,
+    paymentAmountsInr: integrationState.supportedAmountsInr,
     supportEmail: String(process.env.SUPPORT_EMAIL || "").trim(),
     supportPhone: String(process.env.SUPPORT_PHONE || "").trim(),
     statementDescriptor: String(process.env.STRIPE_STATEMENT_DESCRIPTOR || "THINKPULSE").trim(),
@@ -100,8 +197,18 @@ app.get("/config/public", (_req, res) => {
       refundPolicy: urls.refund,
       success: urls.success,
       cancel: urls.cancel,
-      webhook: urls.webhook
+      webhook: urls.stripeWebhook,
+      stripeWebhook: urls.stripeWebhook,
+      razorpayWebhook: urls.razorpayWebhook
     }
+  });
+});
+
+app.get("/config/default-pools", (_req, res) => {
+  res.json({
+    ok: true,
+    data: envBootstrapConfig,
+    fetchedAt: Date.now()
   });
 });
 
@@ -159,7 +266,11 @@ app.post("/stripe/webhook", express.raw({ type: "application/json" }), (req, res
   res.json({ received: true });
 });
 
+app.post("/webhook", express.raw({ type: "application/json" }), razorpayWebhookHandler);
+
 app.use(express.json());
+
+app.use("/", razorpayRouter);
 
 app.post("/stripe/create-checkout-session", async (req, res) => {
   if (!stripe) {
