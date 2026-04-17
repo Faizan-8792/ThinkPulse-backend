@@ -3,16 +3,64 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Payment Success</title>
-    <style>
-      body { font-family: Arial, sans-serif; max-width: 640px; margin: 48px auto; padding: 0 16px; text-align: center; color: #111827; }
-      h1 { color: #15803d; }
-      a { color: #1d4ed8; }
-    </style>
+    <title>ThinkPulse Payment Success</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;700;800&family=Space+Grotesk:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/site.css" />
   </head>
-  <body>
-    <h1>Payment Successful</h1>
-    <p>Your payment was completed successfully. You can return to ThinkPulse extension.</p>
-    <p><a href="/health">Check backend health</a></p>
+  <body data-page="success">
+    <div class="backdrop-grid" aria-hidden="true"></div>
+    <main class="page-shell">
+      <header class="topbar reveal">
+        <a class="brand" href="/terms">
+          <span class="brand-mark"></span>
+          <span>ThinkPulse</span>
+        </a>
+        <nav class="topnav">
+          <a data-nav="terms" href="/terms">Terms</a>
+          <a data-nav="privacy" href="/privacy">Privacy</a>
+          <a data-nav="refund" href="/refund-policy">Refund</a>
+          <a data-nav="stripe-webhook" href="/stripe/webhook">Stripe Webhook</a>
+          <a data-nav="razorpay-webhook" href="/webhook">Razorpay Webhook</a>
+          <a data-nav="success" href="/billing/success">Success</a>
+          <a data-nav="cancel" href="/billing/cancel">Cancel</a>
+        </nav>
+      </header>
+
+      <section class="hero-card interactive reveal" data-tilt>
+        <p class="eyebrow">Payment Confirmation</p>
+        <h1 class="status-good">Payment Successful</h1>
+        <p class="subtitle">
+          Your transaction was confirmed. You can now return to the extension and continue with
+          unlocked billing features.
+        </p>
+        <div class="meta-row">
+          <span class="pill"><span class="pill-dot"></span>Live success endpoint</span>
+          <span class="pill">Path: /billing/success</span>
+        </div>
+      </section>
+
+      <section class="content-card interactive reveal" data-tilt>
+        <h2>Next Steps</h2>
+        <ul>
+          <li>Return to the extension options billing panel.</li>
+          <li>Confirm wallet and plan status are updated.</li>
+          <li>If needed, verify backend health and webhook logs.</li>
+        </ul>
+        <div class="cta-row">
+          <a class="btn" href="/health">Check Backend Health</a>
+          <a class="btn alt" href="/terms">Open Terms Page</a>
+        </div>
+      </section>
+
+      <footer class="footer reveal">
+        ThinkPulse legal experience is unified across all public pages.
+      </footer>
+    </main>
+    <script src="/site.js" defer></script>
   </body>
 </html>

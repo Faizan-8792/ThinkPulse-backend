@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>ThinkPulse Payment Cancelled</title>
+    <title>ThinkPulse Razorpay Webhook Endpoint</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -12,7 +12,7 @@
     />
     <link rel="stylesheet" href="/site.css" />
   </head>
-  <body data-page="cancel">
+  <body data-page="razorpay-webhook">
     <div class="backdrop-grid" aria-hidden="true"></div>
     <main class="page-shell">
       <header class="topbar reveal">
@@ -32,27 +32,29 @@
       </header>
 
       <section class="hero-card interactive reveal" data-tilt>
-        <p class="eyebrow">Payment State</p>
-        <h1 class="status-bad">Payment Cancelled</h1>
+        <p class="eyebrow">Machine Endpoint</p>
+        <h1>Razorpay Webhook Listener</h1>
         <p class="subtitle">
-          No charge was finalized. You can retry payment from the extension whenever you are ready.
+          This URL is intended for Razorpay server-to-server POST callbacks. This GET page exists
+          for diagnostics and visual consistency.
         </p>
         <div class="meta-row">
-          <span class="pill"><span class="pill-dot"></span>Live cancel endpoint</span>
-          <span class="pill">Path: /billing/cancel</span>
+          <span class="pill"><span class="pill-dot"></span>Path: /webhook</span>
+          <span class="pill">Method for integration: POST</span>
         </div>
       </section>
 
       <section class="content-card interactive reveal" data-tilt>
-        <h2>What You Can Do Next</h2>
+        <h2>Expected Webhook Setup</h2>
         <ul>
-          <li>Go back to billing and retry checkout.</li>
-          <li>Confirm your card or UPI details before retry.</li>
-          <li>Review refund policy and support guidance if needed.</li>
+          <li>Provider: Razorpay</li>
+          <li>Header: x-razorpay-signature</li>
+          <li>Payload: application/json</li>
+          <li>Verification: RAZORPAY_WEBHOOK_SECRET</li>
         </ul>
         <div class="cta-row">
-          <a class="btn" href="/refund-policy">Open Refund Policy</a>
-          <a class="btn alt" href="/health">Check Backend Health</a>
+          <a class="btn" href="/health">Check Backend Health</a>
+          <a class="btn alt" href="/terms">Open Terms Page</a>
         </div>
       </section>
 

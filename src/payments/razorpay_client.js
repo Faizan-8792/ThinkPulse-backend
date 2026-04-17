@@ -176,6 +176,20 @@ async function createSingleUseQr(payload) {
 }
 
 /**
+ * Fetches Razorpay QR details by id.
+ * @param {string} qrId
+ * @returns {Promise<any>}
+ */
+async function fetchQrCode(qrId) {
+  assertConfigured();
+  const safeQrId = toSafeNote(qrId);
+  if (!safeQrId) {
+    throw new Error("qrId is required.");
+  }
+  return razorpayClient.qrCode.fetch(safeQrId);
+}
+
+/**
  * Fetches Razorpay payment details.
  * @param {string} paymentId
  * @returns {Promise<any>}
@@ -249,6 +263,7 @@ module.exports = {
   getPublicKeyId,
   createOrder,
   createSingleUseQr,
+  fetchQrCode,
   fetchPayment,
   verifyPaymentSignature,
   verifyWebhookSignature

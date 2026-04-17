@@ -13,6 +13,7 @@ const {
   getPublicKeyId,
   createOrder,
   createSingleUseQr,
+  fetchQrCode,
   fetchPayment,
   verifyPaymentSignature,
   verifyWebhookSignature
@@ -263,6 +264,106 @@ router.post("/create-qr", async (req, res) => {
     res.status(responseStatus).json({
       ok: false,
       error: providerError.description || "Unable to create dynamic QR.",
+      providerError: {
+        code: providerError.providerCode || "UNKNOWN",
+        reason: providerError.providerReason || "NA",
+        statusCode: responseStatus
+      }
+    });
+  }
+});
+
+router.get("/qr-status/:qrId", async (req, res) => {
+  if (!isRazorpayConfigured()) {
+    res.status(503).json({
+      ok: false,
+      error: "Razorpay is not configured on the server."
+    });
+    return;
+  }
+
+  const qrId = toSafeString(req.params?.qrId, 120);
+  if (!qrId) {
+    res.status(400).json({
+      ok: false,
+      error: "qrId route param is required."
+    });
+    return;
+  }
+
+  const requesterUserId = pickUserId(req.query);
+
+  try {
+    const qr = await fetchQrCode(qrId);
+    const qrUserId = pickUserId(qr?.notes);
+
+    if (
+      requesterUserId &&
+      qrUserId &&
+      requesterUserId.toLowerCase() !== qrUserId.toLowerCase()
+    ) {
+      res.status(403).json({
+        ok: false,
+        error: "QR does not belong to requested user."
+      });
+      return;
+    }
+
+    const qrStatus = toSafeString(qr?.status, 40).toLowerCase() || "unknown";
+    const amountPaise = Math.max(0, Number(qr?.payment_amount) || 0);
+    const amountReceivedPaise = Math.max(0, Number(qr?.payments_amount_received) || 0);
+    const paymentsCountReceived = Math.max(0, Number(qr?.payments_count_received) || 0);
+    const amountInr = resolveAmountInr(null, amountPaise);
+    const paid = Boolean(
+      (qrStatus === "closed" || qrStatus === "paid") &&
+        amountPaise > 0 &&
+        paymentsCountReceived > 0 &&
+        amountReceivedPaise >= amountPaise
+    );
+
+    let persistence = null;
+    if (paid && amountInr) {
+      persistence = await persistPaymentAndPlan({
+        userId: qrUserId || requesterUserId,
+        paymentId: `qr_${qrId}`,
+        status: "captured",
+        amountInr,
+        createdAt: qr?.closed_at || qr?.created_at
+      });
+    }
+
+    res.json({
+      ok: true,
+      paid,
+      qr: {
+        id: qrId,
+        status: qrStatus,
+        closeBy: Number(qr?.close_by) || 0,
+        closedAt: Number(qr?.closed_at) || 0,
+        closeReason: toSafeString(qr?.close_reason, 80) || "",
+        amountPaise,
+        amountInr: amountInr || null,
+        amountReceivedPaise,
+        paymentsCountReceived,
+        userId: qrUserId || ""
+      },
+      payment: paid
+        ? {
+            id: `qr_${qrId}`,
+            status: "captured",
+            amountInr: amountInr || null,
+            userId: qrUserId || requesterUserId || ""
+          }
+        : null,
+      persistence
+    });
+  } catch (error) {
+    const providerError = extractProviderErrorDetails(error);
+    const responseStatus = providerError.statusCode || 500;
+
+    res.status(responseStatus).json({
+      ok: false,
+      error: providerError.description || "Unable to fetch QR status.",
       providerError: {
         code: providerError.providerCode || "UNKNOWN",
         reason: providerError.providerReason || "NA",

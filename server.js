@@ -224,12 +224,28 @@ app.get("/refund-policy", (_req, res) => {
   res.sendFile(path.join(__dirname, "public", "refund-policy.html"));
 });
 
+app.get("/site.css", (_req, res) => {
+  res.sendFile(path.join(__dirname, "public", "site.css"));
+});
+
+app.get("/site.js", (_req, res) => {
+  res.sendFile(path.join(__dirname, "public", "site.js"));
+});
+
 app.get("/billing/success", (_req, res) => {
   res.sendFile(path.join(__dirname, "public", "billing-success.html"));
 });
 
 app.get("/billing/cancel", (_req, res) => {
   res.sendFile(path.join(__dirname, "public", "billing-cancel.html"));
+});
+
+app.get("/stripe/webhook", (_req, res) => {
+  res.sendFile(path.join(__dirname, "public", "stripe-webhook.html"));
+});
+
+app.get("/webhook", (_req, res) => {
+  res.sendFile(path.join(__dirname, "public", "razorpay-webhook.html"));
 });
 
 app.post("/stripe/webhook", express.raw({ type: "application/json" }), (req, res) => {

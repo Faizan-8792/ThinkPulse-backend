@@ -3,17 +3,86 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>ThinkPulse Privacy</title>
-    <style>
-      body { font-family: Arial, sans-serif; max-width: 860px; margin: 40px auto; padding: 0 16px; line-height: 1.55; color: #111827; }
-      h1 { margin-bottom: 10px; }
-      .muted { color: #6b7280; }
-    </style>
+    <title>ThinkPulse Privacy Policy</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;700;800&family=Space+Grotesk:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/site.css" />
   </head>
-  <body>
-    <h1>ThinkPulse Privacy Policy</h1>
-    <p class="muted">Last updated: April 17, 2026</p>
-    <p>ThinkPulse only processes data needed to provide extension functionality, billing, and support.</p>
-    <p>This placeholder should be replaced with your final privacy policy before public launch.</p>
+  <body data-page="privacy">
+    <div class="backdrop-grid" aria-hidden="true"></div>
+    <main class="page-shell">
+      <header class="topbar reveal">
+        <a class="brand" href="/terms">
+          <span class="brand-mark"></span>
+          <span>ThinkPulse</span>
+        </a>
+        <nav class="topnav">
+          <a data-nav="terms" href="/terms">Terms</a>
+          <a data-nav="privacy" href="/privacy">Privacy</a>
+          <a data-nav="refund" href="/refund-policy">Refund</a>
+          <a data-nav="stripe-webhook" href="/stripe/webhook">Stripe Webhook</a>
+          <a data-nav="razorpay-webhook" href="/webhook">Razorpay Webhook</a>
+          <a data-nav="success" href="/billing/success">Success</a>
+          <a data-nav="cancel" href="/billing/cancel">Cancel</a>
+        </nav>
+      </header>
+
+      <section class="hero-card interactive reveal" data-tilt>
+        <p class="eyebrow">Data Transparency</p>
+        <h1>ThinkPulse Privacy Policy</h1>
+        <p class="subtitle">
+          Last updated: April 17, 2026. This page explains what information is processed,
+          how it is used, and the controls available to end users.
+        </p>
+        <div class="meta-row">
+          <span class="pill"><span class="pill-dot"></span>Live privacy endpoint</span>
+          <span class="pill">Path: /privacy</span>
+        </div>
+      </section>
+
+      <div class="content-grid">
+        <section class="content-card interactive reveal" data-tilt>
+          <h2>1. Data We Process</h2>
+          <p>
+            ThinkPulse processes only the information required for extension operations,
+            billing verification, provider routing, and support diagnostics.
+          </p>
+        </section>
+
+        <section class="content-card interactive reveal" data-tilt>
+          <h2>2. How Data Is Used</h2>
+          <ul>
+            <li>To authenticate account sessions and role-based features.</li>
+            <li>To process payment confirmation and access entitlement.</li>
+            <li>To deliver model responses and OCR workflows.</li>
+          </ul>
+        </section>
+
+        <section class="content-card interactive reveal" data-tilt>
+          <h2>3. Retention and Security</h2>
+          <p>
+            Data retention is limited to operational and compliance needs. Security controls are
+            continuously updated, but no online platform can claim absolute zero risk.
+          </p>
+        </section>
+
+        <section class="content-card interactive reveal" data-tilt>
+          <h2>4. User Rights</h2>
+          <p>
+            Users may request correction or deletion of profile-linked records based on applicable
+            legal requirements and service constraints.
+          </p>
+        </section>
+      </div>
+
+      <footer class="footer reveal">
+        ThinkPulse legal experience is unified across all public pages.
+      </footer>
+    </main>
+    <script src="/site.js" defer></script>
   </body>
 </html>

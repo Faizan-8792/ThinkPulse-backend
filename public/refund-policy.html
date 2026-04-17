@@ -4,16 +4,85 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ThinkPulse Refund Policy</title>
-    <style>
-      body { font-family: Arial, sans-serif; max-width: 860px; margin: 40px auto; padding: 0 16px; line-height: 1.55; color: #111827; }
-      h1 { margin-bottom: 10px; }
-      .muted { color: #6b7280; }
-    </style>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;700;800&family=Space+Grotesk:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/site.css" />
   </head>
-  <body>
-    <h1>ThinkPulse Refund Policy</h1>
-    <p class="muted">Last updated: April 17, 2026</p>
-    <p>Refund requests are reviewed on a case-by-case basis. Contact support with payment details and reason.</p>
-    <p>This placeholder should be replaced with your final refund policy before public launch.</p>
+  <body data-page="refund">
+    <div class="backdrop-grid" aria-hidden="true"></div>
+    <main class="page-shell">
+      <header class="topbar reveal">
+        <a class="brand" href="/terms">
+          <span class="brand-mark"></span>
+          <span>ThinkPulse</span>
+        </a>
+        <nav class="topnav">
+          <a data-nav="terms" href="/terms">Terms</a>
+          <a data-nav="privacy" href="/privacy">Privacy</a>
+          <a data-nav="refund" href="/refund-policy">Refund</a>
+          <a data-nav="stripe-webhook" href="/stripe/webhook">Stripe Webhook</a>
+          <a data-nav="razorpay-webhook" href="/webhook">Razorpay Webhook</a>
+          <a data-nav="success" href="/billing/success">Success</a>
+          <a data-nav="cancel" href="/billing/cancel">Cancel</a>
+        </nav>
+      </header>
+
+      <section class="hero-card interactive reveal" data-tilt>
+        <p class="eyebrow">Billing Support</p>
+        <h1>ThinkPulse Refund Policy</h1>
+        <p class="subtitle">
+          Last updated: April 17, 2026. This policy outlines refund review windows,
+          eligibility checks, and payment evidence requirements.
+        </p>
+        <div class="meta-row">
+          <span class="pill"><span class="pill-dot"></span>Live refund endpoint</span>
+          <span class="pill">Path: /refund-policy</span>
+        </div>
+      </section>
+
+      <div class="content-grid">
+        <section class="content-card interactive reveal" data-tilt>
+          <h2>1. Eligible Refund Window</h2>
+          <p>
+            Requests should be submitted as soon as possible after payment. Late requests may be
+            declined when service usage has already consumed paid resources.
+          </p>
+        </section>
+
+        <section class="content-card interactive reveal" data-tilt>
+          <h2>2. Required Information</h2>
+          <ul>
+            <li>Payment reference or transaction identifier.</li>
+            <li>Account email used for purchase.</li>
+            <li>Clear reason for requesting reversal.</li>
+          </ul>
+        </section>
+
+        <section class="content-card interactive reveal" data-tilt>
+          <h2>3. Review Process</h2>
+          <p>
+            Each request is reviewed case-by-case. Fraud indicators, duplicate claims, or heavy
+            completed usage may result in rejection.
+          </p>
+        </section>
+
+        <section class="content-card interactive reveal" data-tilt>
+          <h2>4. Processing Timeline</h2>
+          <p>
+            Approved refunds are initiated from our side quickly, but final settlement timing is
+            controlled by your payment provider or bank.
+          </p>
+        </section>
+      </div>
+
+      <footer class="footer reveal">
+        ThinkPulse legal experience is unified across all public pages.
+      </footer>
+    </main>
+    <script src="/site.js" defer></script>
   </body>
 </html>
