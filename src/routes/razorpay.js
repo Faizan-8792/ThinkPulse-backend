@@ -4,8 +4,11 @@ const express = require("express");
 
 const {
   ALLOWED_AMOUNTS_INR,
+  MIN_WALLET_TOPUP_INR,
+  MAX_WALLET_TOPUP_INR,
   fromPaise,
   normalizeAmountInr,
+  normalizeWalletTopupAmountInr,
   resolvePlanByAmount
 } = require("../payments/amounts");
 const {
@@ -239,11 +242,19 @@ router.post("/create-qr", async (req, res) => {
     return;
   }
 
-  const amountInr = normalizeAmountInr(req.body?.amount);
+  const kind = String(req.body?.kind || "plan_purchase").trim().toLowerCase() === "wallet_topup"
+    ? "wallet_topup"
+    : "plan_purchase";
+  const amountInr = kind === "wallet_topup"
+    ? normalizeWalletTopupAmountInr(req.body?.amount)
+    : normalizeAmountInr(req.body?.amount);
   if (!amountInr) {
     res.status(400).json({
       ok: false,
-      error: `amount must be one of: ${ALLOWED_AMOUNTS_INR.join(", ")}`
+      error:
+        kind === "wallet_topup"
+          ? `amount must be a whole number between ${MIN_WALLET_TOPUP_INR} and ${MAX_WALLET_TOPUP_INR}`
+          : `amount must be one of: ${ALLOWED_AMOUNTS_INR.join(", ")}`
     });
     return;
   }
@@ -269,9 +280,11 @@ router.post("/create-qr", async (req, res) => {
     const order = await createOrder({
       amountInr,
       userId,
+      allowCustomAmount: kind === "wallet_topup",
       notes: {
         source: "thinkpulse-extension",
-        mode: "upi_intent_qr"
+        mode: "upi_intent_qr",
+        kind
       }
     });
 
@@ -299,7 +312,8 @@ router.post("/create-qr", async (req, res) => {
         amountPaise: Math.round(amountInr * 100),
         amountInr,
         currency: "INR",
-        vpa: upiVpa
+        vpa: upiVpa,
+        kind
       }
     });
   } catch (error) {
@@ -358,6 +372,7 @@ router.get("/qr-status/:qrId", async (req, res) => {
       }
 
       const orderStatus = toSafeString(order?.status, 40).toLowerCase() || "created";
+      const kind = toSafeString(order?.notes?.kind, 40).toLowerCase() || "plan_purchase";
       const amountPaise = Math.max(0, Number(order?.amount) || 0);
       const amountReceivedPaise = Math.max(0, Number(order?.amount_paid) || 0);
       const paymentsCountReceived = amountReceivedPaise > 0 ? 1 : 0;
@@ -392,15 +407,17 @@ router.get("/qr-status/:qrId", async (req, res) => {
           amountInr: amountInr || null,
           amountReceivedPaise,
           paymentsCountReceived,
-          userId: orderUserId || ""
+          userId: orderUserId || "",
+          kind
         },
         payment: paid
           ? {
-              id: `order_${qrId}`,
-              status: "captured",
-              amountInr: amountInr || null,
-              userId: orderUserId || requesterUserId || ""
-            }
+            id: `order_${qrId}`,
+            status: "captured",
+            amountInr: amountInr || null,
+            userId: orderUserId || requesterUserId || "",
+            kind
+          }
           : null,
         persistence
       });
@@ -423,6 +440,7 @@ router.get("/qr-status/:qrId", async (req, res) => {
     }
 
     const qrStatus = toSafeString(qr?.status, 40).toLowerCase() || "unknown";
+    const kind = toSafeString(qr?.notes?.kind, 40).toLowerCase() || "plan_purchase";
     const amountPaise = Math.max(0, Number(qr?.payment_amount) || 0);
     const amountReceivedPaise = Math.max(0, Number(qr?.payments_amount_received) || 0);
     const paymentsCountReceived = Math.max(0, Number(qr?.payments_count_received) || 0);
@@ -458,15 +476,17 @@ router.get("/qr-status/:qrId", async (req, res) => {
         amountInr: amountInr || null,
         amountReceivedPaise,
         paymentsCountReceived,
-        userId: qrUserId || ""
+        userId: qrUserId || "",
+        kind
       },
       payment: paid
         ? {
-            id: `qr_${qrId}`,
-            status: "captured",
-            amountInr: amountInr || null,
-            userId: qrUserId || requesterUserId || ""
-          }
+          id: `qr_${qrId}`,
+          status: "captured",
+          amountInr: amountInr || null,
+          userId: qrUserId || requesterUserId || "",
+          kind
+        }
         : null,
       persistence
     });

@@ -5,6 +5,7 @@ const Razorpay = require("razorpay");
 
 const {
   normalizeAmountInr,
+  normalizeWalletTopupAmountInr,
   resolvePlanByAmount,
   toPaise
 } = require("./amounts");
@@ -107,15 +108,21 @@ function safeEqual(left, right) {
 
 /**
  * Creates Razorpay order for supported INR amounts.
- * @param {{amountInr:number,userId:string,notes?:Record<string,unknown>}} payload
+ * @param {{amountInr:number,userId:string,notes?:Record<string,unknown>,allowCustomAmount?:boolean}} payload
  * @returns {Promise<any>}
  */
 async function createOrder(payload) {
   assertConfigured();
 
-  const amountInr = normalizeAmountInr(payload?.amountInr);
+  const amountInr = payload?.allowCustomAmount
+    ? normalizeWalletTopupAmountInr(payload?.amountInr)
+    : normalizeAmountInr(payload?.amountInr);
   if (!amountInr) {
-    throw new Error("Amount must be 10 or 20 INR.");
+    throw new Error(
+      payload?.allowCustomAmount
+        ? "Amount must be a whole number between 10 and 10000 INR."
+        : "Amount must be 10 or 20 INR."
+    );
   }
 
   const userId = toSafeNote(payload?.userId);
@@ -123,7 +130,7 @@ async function createOrder(payload) {
     throw new Error("userId is required.");
   }
 
-  const plan = resolvePlanByAmount(amountInr) || "basic";
+  const plan = resolvePlanByAmount(amountInr) || "wallet";
   const receipt = `order_rcptid_${Date.now()}`.slice(0, 40);
 
   return razorpayClient.orders.create({
