@@ -26,6 +26,11 @@ const {
 } = require("../payments/supabase_store");
 
 const router = express.Router();
+const upiVpa = toSafeString(process.env.RAZORPAY_UPI_VPA || process.env.UPI_VPA, 120);
+const upiPayeeName = toSafeString(
+  process.env.RAZORPAY_UPI_PAYEE_NAME || process.env.UPI_PAYEE_NAME || "ThinkPulse",
+  60
+);
 
 /**
  * Converts unknown value to a safe short string.
@@ -238,23 +243,49 @@ router.post("/create-qr", async (req, res) => {
     return;
   }
 
+  if (!upiVpa) {
+    res.status(500).json({
+      ok: false,
+      error: "UPI VPA is not configured on server. Set RAZORPAY_UPI_VPA in backend env."
+    });
+    return;
+  }
+
   try {
-    const qr = await createSingleUseQr({
+    const order = await createOrder({
       amountInr,
       userId,
-      description: req.body?.description
+      notes: {
+        source: "thinkpulse-extension",
+        mode: "upi_intent_qr"
+      }
     });
+
+    const upiAmount = Number(amountInr).toFixed(2);
+    const upiParams = new URLSearchParams({
+      pa: upiVpa,
+      pn: upiPayeeName || "ThinkPulse",
+      am: upiAmount,
+      cu: "INR"
+    });
+    const upiIntent = `upi://pay?${upiParams.toString()}`;
+    const imageUrl = `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(
+      upiIntent
+    )}`;
 
     res.status(201).json({
       ok: true,
       qr: {
-        id: qr?.id || "",
-        imageUrl: qr?.image_url || "",
-        status: qr?.status || "",
-        closeBy: Number(qr?.close_by) || null,
-        amountPaise: Number(qr?.payment_amount) || 0,
+        id: order?.id || "",
+        orderId: order?.id || "",
+        imageUrl,
+        upiIntent,
+        status: String(order?.status || "created").toLowerCase(),
+        closeBy: null,
+        amountPaise: Math.round(amountInr * 100),
         amountInr,
-        currency: String(qr?.currency || "INR")
+        currency: "INR",
+        vpa: upiVpa
       }
     });
   } catch (error) {

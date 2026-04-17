@@ -159,11 +159,11 @@ app.use(cors({
   }
 }));
 
-app.get("/health", async (_req, res) => {
+async function buildHealthPayload() {
   const integrationState = getIntegrationState();
   const paymentsTable = await verifyPaymentsTableAccess();
 
-  res.json({
+  return {
     ok: true,
     service: "thinkpulse-backend",
     mode,
@@ -172,7 +172,37 @@ app.get("/health", async (_req, res) => {
     supabaseConfigured: integrationState.supabaseConfigured,
     paymentsTable,
     timestamp: Date.now()
-  });
+  };
+}
+
+function shouldRenderHealthHtml(req) {
+  const format = String(req.query?.format || "").trim().toLowerCase();
+  if (format === "json") {
+    return false;
+  }
+  if (format === "html") {
+    return true;
+  }
+
+  const accept = String(req.headers?.accept || "").toLowerCase();
+  return accept.includes("text/html");
+}
+
+app.get("/health", async (req, res) => {
+  if (shouldRenderHealthHtml(req)) {
+    res.setHeader("Cache-Control", "no-store");
+    res.sendFile(path.join(__dirname, "public", "health.html"));
+    return;
+  }
+
+  const payload = await buildHealthPayload();
+  res.json(payload);
+});
+
+app.get("/health.json", async (_req, res) => {
+  const payload = await buildHealthPayload();
+
+  res.json(payload);
 });
 
 app.get("/config/public", (_req, res) => {

@@ -124,11 +124,13 @@ async function createOrder(payload) {
   }
 
   const plan = resolvePlanByAmount(amountInr) || "basic";
+  const receipt = `order_rcptid_${Date.now()}`.slice(0, 40);
 
   return razorpayClient.orders.create({
-    amount: toPaise(amountInr),
+    amount: Math.round(amountInr * 100),
     currency: "INR",
-    receipt: buildReceipt("ord"),
+    receipt,
+    payment_capture: 1,
     notes: {
       userId,
       plan,

@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ThinkPulse Backend Health</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;700;800&family=Space+Grotesk:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/site.css?v=20260417" />
+    <style>
+      .health-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 16px;
+      }
+
+      .metric-list {
+        display: grid;
+        gap: 10px;
+        margin: 0;
+      }
+
+      .metric-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 11px 12px;
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.04);
+      }
+
+      .metric-k {
+        font-size: 0.85rem;
+        color: #9fb7c5;
+      }
+
+      .metric-v {
+        font-size: 0.9rem;
+        font-weight: 700;
+        color: #e6f1f6;
+      }
+
+      .metric-v.good {
+        color: #69d08e;
+      }
+
+      .metric-v.bad {
+        color: #e67b7b;
+      }
+
+      .json-view {
+        margin: 0;
+        padding: 14px;
+        border-radius: 14px;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        background: rgba(0, 0, 0, 0.2);
+        color: #d3e4ed;
+        font-size: 0.82rem;
+        line-height: 1.55;
+        overflow: auto;
+        max-height: 360px;
+      }
+
+      @media (max-width: 900px) {
+        .health-grid {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body data-page="health">
+    <div class="backdrop-grid" aria-hidden="true"></div>
+    <main class="page-shell">
+      <header class="topbar reveal">
+        <a class="brand" href="/terms">
+          <span class="brand-mark"></span>
+          <span>ThinkPulse</span>
+        </a>
+        <nav class="topnav">
+          <a data-nav="health" href="/health">Health</a>
+          <a data-nav="terms" href="/terms">Terms</a>
+          <a data-nav="privacy" href="/privacy">Privacy</a>
+          <a data-nav="refund" href="/refund-policy">Refund</a>
+          <a data-nav="stripe-webhook" href="/stripe/webhook">Stripe Webhook</a>
+          <a data-nav="razorpay-webhook" href="/webhook">Razorpay Webhook</a>
+          <a data-nav="success" href="/billing/success">Success</a>
+          <a data-nav="cancel" href="/billing/cancel">Cancel</a>
+        </nav>
+      </header>
+
+      <section class="hero-card interactive reveal" data-tilt>
+        <p class="eyebrow">Runtime Diagnostics</p>
+        <h1 id="overallStatus">Checking health...</h1>
+        <p id="overallSubtitle" class="subtitle">
+          Loading backend status, integration readiness, and storage checks.
+        </p>
+        <div class="meta-row">
+          <span class="pill"><span class="pill-dot"></span>Live health dashboard</span>
+          <span class="pill">Path: /health</span>
+          <span class="pill">JSON: /health.json</span>
+        </div>
+      </section>
+
+      <div class="health-grid">
+        <section class="content-card interactive reveal" data-tilt>
+          <h2>Service Snapshot</h2>
+          <div class="metric-list">
+            <div class="metric-row">
+              <span class="metric-k">Service</span>
+              <span id="serviceName" class="metric-v">-</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-k">Mode</span>
+              <span id="serviceMode" class="metric-v">-</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-k">Updated</span>
+              <span id="updatedAt" class="metric-v">-</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-k">Payments Table</span>
+              <span id="paymentsTableState" class="metric-v">-</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="content-card interactive reveal" data-tilt>
+          <h2>Integration Readiness</h2>
+          <div class="metric-list">
+            <div class="metric-row">
+              <span class="metric-k">Stripe</span>
+              <span id="stripeState" class="metric-v">-</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-k">Razorpay</span>
+              <span id="razorpayState" class="metric-v">-</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-k">Supabase</span>
+              <span id="supabaseState" class="metric-v">-</span>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <section class="content-card interactive reveal" data-tilt>
+        <h2>Raw Health Payload</h2>
+        <pre id="rawJson" class="json-view">Loading...</pre>
+        <div class="cta-row">
+          <a class="btn" href="/health.json" target="_blank" rel="noreferrer">Open JSON</a>
+          <a class="btn alt" href="/config/public" target="_blank" rel="noreferrer">Open Public Config</a>
+        </div>
+      </section>
+
+      <footer class="footer reveal">
+        ThinkPulse legal experience is unified across all public pages.
+      </footer>
+    </main>
+
+    <script>
+      (function () {
+        function setState(id, value, okText, failText) {
+          var node = document.getElementById(id);
+          if (!node) {
+            return;
+          }
+
+          var isOk = Boolean(value);
+          node.textContent = isOk ? okText : failText;
+          node.classList.remove("good", "bad");
+          node.classList.add(isOk ? "good" : "bad");
+        }
+
+        function setText(id, text) {
+          var node = document.getElementById(id);
+          if (!node) {
+            return;
+          }
+          node.textContent = String(text || "-");
+        }
+
+        function prettyDate(ts) {
+          var numeric = Number(ts);
+          if (!Number.isFinite(numeric) || numeric <= 0) {
+            return "-";
+          }
+          return new Date(numeric).toLocaleString();
+        }
+
+        async function loadHealth() {
+          var rawJsonNode = document.getElementById("rawJson");
+          var heroTitle = document.getElementById("overallStatus");
+          var heroSubtitle = document.getElementById("overallSubtitle");
+
+          try {
+            var response = await fetch("/health.json", {
+              cache: "no-store"
+            });
+            var payload = await response.json();
+
+            if (!response.ok || !payload || payload.ok !== true) {
+              throw new Error(String(payload && payload.error ? payload.error : "Health check failed."));
+            }
+
+            setText("serviceName", payload.service || "thinkpulse-backend");
+            setText("serviceMode", payload.mode || "unknown");
+            setText("updatedAt", prettyDate(payload.timestamp));
+
+            var paymentsOk = Boolean(payload.paymentsTable && payload.paymentsTable.ok);
+            setState("paymentsTableState", paymentsOk, "Reachable", "Unavailable");
+            setState("stripeState", payload.stripeConfigured, "Configured", "Not configured");
+            setState("razorpayState", payload.razorpayConfigured, "Configured", "Not configured");
+            setState("supabaseState", payload.supabaseConfigured, "Configured", "Not configured");
+
+            if (heroTitle) {
+              heroTitle.textContent = payload.ok ? "Backend Operational" : "Backend Warning";
+              heroTitle.classList.remove("status-good", "status-bad");
+              heroTitle.classList.add(payload.ok ? "status-good" : "status-bad");
+            }
+
+            if (heroSubtitle) {
+              heroSubtitle.textContent = paymentsOk
+                ? "Core runtime is responding and payments table is reachable."
+                : "Runtime is responding, but payment persistence check needs attention.";
+            }
+
+            if (rawJsonNode) {
+              rawJsonNode.textContent = JSON.stringify(payload, null, 2);
+            }
+          } catch (error) {
+            if (heroTitle) {
+              heroTitle.textContent = "Health Dashboard Error";
+              heroTitle.classList.remove("status-good");
+              heroTitle.classList.add("status-bad");
+            }
+            if (heroSubtitle) {
+              heroSubtitle.textContent = String(error && error.message ? error.message : "Unable to load health payload.");
+            }
+            if (rawJsonNode) {
+              rawJsonNode.textContent = String(error && error.stack ? error.stack : error);
+            }
+          }
+        }
+
+        loadHealth();
+      })();
+    </script>
+    <script src="/site.js?v=20260417" defer></script>
+  </body>
+</html>
