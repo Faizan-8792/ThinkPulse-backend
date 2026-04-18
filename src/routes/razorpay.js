@@ -30,11 +30,6 @@ const {
 } = require("../payments/supabase_store");
 
 const router = express.Router();
-const upiVpa = toSafeString(process.env.RAZORPAY_UPI_VPA || process.env.UPI_VPA, 120);
-const upiPayeeName = toSafeString(
-  process.env.RAZORPAY_UPI_PAYEE_NAME || process.env.UPI_PAYEE_NAME || "ThinkPulse",
-  60
-);
 
 /**
  * Converts unknown value to a safe short string.
@@ -73,19 +68,6 @@ function pickUserId(value) {
 }
 
 /**
- * Returns true when UPI VPA looks like an actual configured merchant VPA.
- * @param {string} value
- * @returns {boolean}
- */
-function hasRealUpiVpa(value) {
-  const safe = toSafeString(value, 120).toLowerCase();
-  if (!safe) {
-    return false;
-  }
-  return safe !== "your_vpa@upi" && safe !== "yourvpa@upi";
-}
-
-/**
  * Returns true if status means payment succeeded.
  * @param {string} status
  * @returns {boolean}
@@ -102,13 +84,19 @@ function isSuccessStatus(status) {
  * @returns {number|null}
  */
 function resolveAmountInr(reqAmountInr, paiseAmount) {
-  const direct = normalizeAmountInr(reqAmountInr);
-  if (direct) {
-    return direct;
+  const directFixed = normalizeAmountInr(reqAmountInr);
+  if (directFixed) {
+    return directFixed;
+  }
+
+  const directTopup = normalizeWalletTopupAmountInr(reqAmountInr);
+  if (directTopup) {
+    return directTopup;
   }
 
   const fromPayment = fromPaise(paiseAmount);
-  const normalizedFromPayment = normalizeAmountInr(fromPayment);
+  const normalizedFromPayment =
+    normalizeAmountInr(fromPayment) || normalizeWalletTopupAmountInr(fromPayment);
   return normalizedFromPayment || null;
 }
 
@@ -268,51 +256,48 @@ router.post("/create-qr", async (req, res) => {
     return;
   }
 
-  if (!hasRealUpiVpa(upiVpa)) {
-    res.status(500).json({
-      ok: false,
-      error: "UPI VPA is not configured on server. Set real RAZORPAY_UPI_VPA in backend env."
-    });
-    return;
-  }
-
   try {
-    const order = await createOrder({
+    const qr = await createSingleUseQr({
       amountInr,
       userId,
       allowCustomAmount: kind === "wallet_topup",
-      notes: {
-        source: "thinkpulse-extension",
-        mode: "upi_intent_qr",
-        kind
-      }
+      kind,
+      description: toSafeString(
+        req.body?.description ||
+          (kind === "wallet_topup"
+            ? `ThinkPulse wallet top-up Rs ${amountInr}`
+            : `ThinkPulse ${amountInr === 20 ? "Premium" : "Basic"} plan Rs ${amountInr}`),
+        180
+      )
     });
 
-    const upiAmount = Number(amountInr).toFixed(2);
-    const upiParams = new URLSearchParams({
-      pa: upiVpa,
-      pn: upiPayeeName || "ThinkPulse",
-      am: upiAmount,
-      cu: "INR"
-    });
-    const upiIntent = `upi://pay?${upiParams.toString()}`;
-    const imageUrl = `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(
-      upiIntent
-    )}`;
+    const qrId = toSafeString(qr?.id, 140);
+    const orderId = toSafeString(qr?.order_id || qr?.orderId, 140);
+    const imageUrl = toSafeString(qr?.image_url || qr?.imageUrl, 2000);
+    const upiIntent = toSafeString(qr?.payment_url || qr?.upiIntent || qr?.upi_intent, 2000);
+    const amountPaise = Math.max(0, Number(qr?.payment_amount || qr?.amount || Math.round(amountInr * 100)));
+    const safeAmountInr = Number(fromPaise(amountPaise)) || amountInr;
+    const closeBy = Math.max(0, Number(qr?.close_by || qr?.closeBy) || 0);
+    const createdAtSec = Math.max(0, Number(qr?.created_at || qr?.createdAt) || 0);
+    const amountReceivedPaise = Math.max(0, Number(qr?.payments_amount_received) || 0);
+    const paymentsCountReceived = Math.max(0, Number(qr?.payments_count_received) || 0);
 
     res.status(201).json({
       ok: true,
       qr: {
-        id: order?.id || "",
-        orderId: order?.id || "",
+        id: qrId,
+        orderId,
         imageUrl,
         upiIntent,
-        status: String(order?.status || "created").toLowerCase(),
-        closeBy: null,
-        amountPaise: Math.round(amountInr * 100),
-        amountInr,
-        currency: "INR",
-        vpa: upiVpa,
+        status: String(qr?.status || "created").toLowerCase(),
+        closeBy,
+        closeByMs: closeBy > 0 ? closeBy * 1000 : 0,
+        createdAt: createdAtSec > 0 ? createdAtSec * 1000 : Date.now(),
+        amountPaise,
+        amountInr: safeAmountInr,
+        amountReceivedPaise,
+        paymentsCountReceived,
+        currency: toSafeString(qr?.currency || "INR", 10) || "INR",
         kind
       }
     });

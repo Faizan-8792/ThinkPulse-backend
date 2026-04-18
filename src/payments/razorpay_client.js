@@ -148,16 +148,23 @@ async function createOrder(payload) {
 }
 
 /**
- * Creates a dynamic single-use UPI QR for fixed amount.
- * @param {{amountInr:number,userId:string,description?:string}} payload
+ * Creates a dynamic single-use UPI QR for plan purchase or wallet top-up.
+ * @param {{amountInr:number,userId:string,description?:string,allowCustomAmount?:boolean,kind?:string}} payload
  * @returns {Promise<any>}
  */
 async function createSingleUseQr(payload) {
   assertConfigured();
 
-  const amountInr = normalizeAmountInr(payload?.amountInr);
+  const allowCustomAmount = Boolean(payload?.allowCustomAmount);
+  const amountInr = allowCustomAmount
+    ? normalizeWalletTopupAmountInr(payload?.amountInr)
+    : normalizeAmountInr(payload?.amountInr);
   if (!amountInr) {
-    throw new Error("Amount must be 10 or 20 INR.");
+    throw new Error(
+      allowCustomAmount
+        ? "Amount must be a whole number between 10 and 10000 INR."
+        : "Amount must be 10 or 20 INR."
+    );
   }
 
   const userId = toSafeNote(payload?.userId);
@@ -165,7 +172,10 @@ async function createSingleUseQr(payload) {
     throw new Error("userId is required.");
   }
 
-  const plan = resolvePlanByAmount(amountInr) || "basic";
+  const kind = String(payload?.kind || (allowCustomAmount ? "wallet_topup" : "plan_purchase")).trim().toLowerCase() === "wallet_topup"
+    ? "wallet_topup"
+    : "plan_purchase";
+  const plan = resolvePlanByAmount(amountInr) || (kind === "wallet_topup" ? "wallet" : "basic");
   const closeBy = Math.floor(Date.now() / 1000) + (15 * 60);
 
   return razorpayClient.qrCode.create({
@@ -174,11 +184,12 @@ async function createSingleUseQr(payload) {
     usage: "single_use",
     fixed_amount: true,
     payment_amount: toPaise(amountInr),
-    description: toSafeNote(payload?.description) || `ThinkPulse ${plan} payment`,
+    description: toSafeNote(payload?.description) || `ThinkPulse ${kind === "wallet_topup" ? "wallet top-up" : plan} payment`,
     close_by: closeBy,
     notes: {
       userId,
       plan,
+      kind,
       source: "thinkpulse-extension"
     }
   });
