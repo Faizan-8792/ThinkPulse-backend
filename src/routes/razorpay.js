@@ -28,6 +28,13 @@ const {
   upsertPaymentRecord,
   markUserAsPaid
 } = require("../payments/supabase_store");
+const {
+  recordPendingTransaction,
+  updateTransactionFromQrStatus,
+  markTrackedTransactionPaid,
+  getTrackedTransactionByQrId,
+  getTrackedTransactionByRefs
+} = require("../payments/transaction_store");
 
 const router = express.Router();
 
@@ -282,6 +289,38 @@ router.post("/create-qr", async (req, res) => {
     const amountReceivedPaise = Math.max(0, Number(qr?.payments_amount_received) || 0);
     const paymentsCountReceived = Math.max(0, Number(qr?.payments_count_received) || 0);
 
+    const transaction = qrId
+      ? recordPendingTransaction({
+          qrId,
+          orderId,
+          userId,
+          amountInr: safeAmountInr,
+          kind,
+          closeByMs: closeBy > 0 ? closeBy * 1000 : 0,
+          providerStatus: String(qr?.status || "created").toLowerCase(),
+          providerEvent: "create_qr",
+          createdAt: createdAtSec > 0 ? createdAtSec * 1000 : Date.now()
+        })
+      : null;
+
+    let pendingPersistence = null;
+    if (qrId && safeAmountInr > 0) {
+      try {
+        pendingPersistence = await upsertPaymentRecord({
+          userId,
+          paymentId: `qr_${qrId}`,
+          status: "pending",
+          amountInr: safeAmountInr,
+          createdAt: createdAtSec > 0 ? createdAtSec : Date.now()
+        });
+      } catch (error) {
+        pendingPersistence = {
+          stored: false,
+          reason: error?.message || "Unable to persist pending payment state."
+        };
+      }
+    }
+
     res.status(201).json({
       ok: true,
       qr: {
@@ -299,7 +338,9 @@ router.post("/create-qr", async (req, res) => {
         paymentsCountReceived,
         currency: toSafeString(qr?.currency || "INR", 10) || "INR",
         kind
-      }
+      },
+      transaction,
+      persistence: pendingPersistence
     });
   } catch (error) {
     const providerError = extractProviderErrorDetails(error);
@@ -315,6 +356,38 @@ router.post("/create-qr", async (req, res) => {
       }
     });
   }
+});
+
+router.get("/transaction-status/:qrId", (req, res) => {
+  const qrId = toSafeString(req.params?.qrId, 140);
+  if (!qrId) {
+    res.status(400).json({
+      ok: false,
+      error: "qrId route param is required."
+    });
+    return;
+  }
+
+  const transactionByQrId = getTrackedTransactionByQrId(qrId);
+  const fallbackResolved = transactionByQrId
+    ? {
+        transaction: transactionByQrId,
+        matchedBy: "qrId"
+      }
+    : getTrackedTransactionByRefs({
+        qrId,
+        orderId: qrId,
+        paymentId: qrId
+      });
+
+  const transaction = transactionByQrId || fallbackResolved.transaction;
+
+  res.json({
+    ok: true,
+    found: Boolean(transaction),
+    matchedBy: fallbackResolved.matchedBy,
+    transaction
+  });
 });
 
 router.get("/qr-status/:qrId", async (req, res) => {
@@ -379,6 +452,33 @@ router.get("/qr-status/:qrId", async (req, res) => {
         });
       }
 
+      const trackedByOrder = getTrackedTransactionByRefs({ orderId: qrId });
+      const resolvedTrackedQrId = toSafeString(trackedByOrder.transaction?.qrId, 140) || qrId;
+
+      const transaction = updateTransactionFromQrStatus({
+        qrId: resolvedTrackedQrId,
+        orderId: qrId,
+        paymentId: paid ? `order_${qrId}` : "",
+        userId: orderUserId || requesterUserId,
+        amountInr: amountInr || 0,
+        kind,
+        closeByMs: 0,
+        providerStatus: paid ? "paid" : orderStatus,
+        providerEvent: "qr_status_order",
+        paid,
+        createdAt: order?.created_at
+      });
+
+      if (paid && transaction?.qrId && amountInr > 0 && transaction.qrId.startsWith("qr_")) {
+        await upsertPaymentRecord({
+          userId: orderUserId || requesterUserId,
+          paymentId: `qr_${transaction.qrId}`,
+          status: "captured",
+          amountInr,
+          createdAt: order?.created_at
+        }).catch(() => undefined);
+      }
+
       res.json({
         ok: true,
         paid,
@@ -404,7 +504,8 @@ router.get("/qr-status/:qrId", async (req, res) => {
             kind
           }
           : null,
-        persistence
+        persistence,
+        transaction
       });
       return;
     }
@@ -448,6 +549,21 @@ router.get("/qr-status/:qrId", async (req, res) => {
       });
     }
 
+    const transaction = updateTransactionFromQrStatus({
+      qrId,
+      orderId: toSafeString(qr?.order_id || qr?.orderId, 140),
+      paymentId: paid ? `qr_${qrId}` : "",
+      userId: qrUserId || requesterUserId,
+      amountInr: amountInr || 0,
+      kind,
+      closeByMs: Number(qr?.close_by || 0) > 0 ? Number(qr.close_by) * 1000 : 0,
+      providerStatus: qrStatus,
+      providerEvent: "qr_status",
+      paid,
+      createdAt: qr?.created_at,
+      paidAt: qr?.closed_at
+    });
+
     res.json({
       ok: true,
       paid,
@@ -473,7 +589,8 @@ router.get("/qr-status/:qrId", async (req, res) => {
           kind
         }
         : null,
-      persistence
+      persistence,
+      transaction
     });
   } catch (error) {
     const providerError = extractProviderErrorDetails(error);
@@ -564,6 +681,9 @@ router.post("/verify-payment", async (req, res) => {
     }
 
     const status = toSafeString(paymentDetails?.status || "captured", 40).toLowerCase();
+    const kind = String(req.body?.kind || paymentDetails?.notes?.kind || "").trim().toLowerCase() === "wallet_topup"
+      ? "wallet_topup"
+      : "plan_purchase";
     const persistence = await persistPaymentAndPlan({
       userId,
       paymentId,
@@ -571,6 +691,28 @@ router.post("/verify-payment", async (req, res) => {
       amountInr,
       createdAt: paymentDetails?.created_at
     });
+
+    const tracked = markTrackedTransactionPaid({
+      orderId,
+      paymentId,
+      userId,
+      amountInr,
+      kind,
+      providerStatus: status,
+      providerEvent: "verify_payment",
+      createdAt: paymentDetails?.created_at,
+      paidAt: paymentDetails?.created_at
+    });
+
+    if (tracked.transaction?.qrId && amountInr > 0) {
+      await upsertPaymentRecord({
+        userId: tracked.transaction.userId || userId,
+        paymentId: `qr_${tracked.transaction.qrId}`,
+        status,
+        amountInr,
+        createdAt: paymentDetails?.created_at
+      }).catch(() => undefined);
+    }
 
     res.json({
       ok: true,
@@ -582,7 +724,9 @@ router.post("/verify-payment", async (req, res) => {
         amountInr,
         currency: "INR"
       },
-      persistence
+      persistence,
+      transaction: tracked.transaction,
+      transactionMatchedBy: tracked.matchedBy
     });
   } catch (error) {
     res.status(500).json({
@@ -644,37 +788,106 @@ async function razorpayWebhookHandler(req, res) {
   const eventType = toSafeString(event?.event, 80);
 
   try {
+    let transaction = null;
+    let transactionMatchedBy = "none";
+    let persistence = null;
+
     if (eventType === "payment.captured") {
       const payment = event?.payload?.payment?.entity || {};
+      const paymentId = toSafeString(payment.id, 120);
+      const orderId = toSafeString(payment.order_id, 120);
+      const userId = pickUserId(payment?.notes);
+      const status = toSafeString(payment.status || "captured", 40);
+      const kind = String(payment?.notes?.kind || "").trim().toLowerCase() === "wallet_topup"
+        ? "wallet_topup"
+        : "plan_purchase";
       const amountInr = resolveAmountInr(null, payment.amount);
       if (amountInr) {
-        await persistPaymentAndPlan({
-          userId: pickUserId(payment?.notes),
-          paymentId: toSafeString(payment.id, 120),
-          status: toSafeString(payment.status || "captured", 40),
+        persistence = await persistPaymentAndPlan({
+          userId,
+          paymentId,
+          status,
           amountInr,
           createdAt: payment.created_at
         });
       }
+
+      const tracked = markTrackedTransactionPaid({
+        orderId,
+        paymentId,
+        userId,
+        amountInr: amountInr || 0,
+        kind,
+        providerStatus: status,
+        providerEvent: "payment.captured",
+        createdAt: payment.created_at,
+        paidAt: payment.created_at
+      });
+      transaction = tracked.transaction;
+      transactionMatchedBy = tracked.matchedBy;
+
+      if (transaction?.qrId && amountInr) {
+        await upsertPaymentRecord({
+          userId: transaction.userId || userId,
+          paymentId: `qr_${transaction.qrId}`,
+          status,
+          amountInr,
+          createdAt: payment.created_at
+        }).catch(() => undefined);
+      }
     } else if (eventType === "order.paid") {
       const order = event?.payload?.order?.entity || {};
       const payment = event?.payload?.payment?.entity || {};
+      const paymentId = toSafeString(payment.id || order.id, 120);
+      const orderId = toSafeString(order.id || payment.order_id, 120);
+      const userId = pickUserId(payment?.notes) || pickUserId(order?.notes);
+      const status = toSafeString(payment.status || order.status || "paid", 40);
+      const kind = String(payment?.notes?.kind || order?.notes?.kind || "").trim().toLowerCase() === "wallet_topup"
+        ? "wallet_topup"
+        : "plan_purchase";
       const amountInr = resolveAmountInr(null, payment.amount || order.amount_paid || order.amount);
       if (amountInr) {
-        await persistPaymentAndPlan({
-          userId: pickUserId(payment?.notes) || pickUserId(order?.notes),
-          paymentId: toSafeString(payment.id || order.id, 120),
-          status: toSafeString(payment.status || order.status || "paid", 40),
+        persistence = await persistPaymentAndPlan({
+          userId,
+          paymentId,
+          status,
           amountInr,
           createdAt: payment.created_at || order.created_at
         });
+      }
+
+      const tracked = markTrackedTransactionPaid({
+        orderId,
+        paymentId,
+        userId,
+        amountInr: amountInr || 0,
+        kind,
+        providerStatus: status,
+        providerEvent: "order.paid",
+        createdAt: payment.created_at || order.created_at,
+        paidAt: payment.created_at || order.paid_at || order.created_at
+      });
+      transaction = tracked.transaction;
+      transactionMatchedBy = tracked.matchedBy;
+
+      if (transaction?.qrId && amountInr) {
+        await upsertPaymentRecord({
+          userId: transaction.userId || userId,
+          paymentId: `qr_${transaction.qrId}`,
+          status,
+          amountInr,
+          createdAt: payment.created_at || order.created_at
+        }).catch(() => undefined);
       }
     }
 
     res.json({
       ok: true,
       received: true,
-      event: eventType
+      event: eventType,
+      persistence,
+      transaction,
+      transactionMatchedBy
     });
   } catch (error) {
     res.status(500).json({

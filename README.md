@@ -14,6 +14,7 @@ backend/
       amounts.js
       razorpay_client.js
       supabase_store.js
+      transaction_store.js
     routes/
       razorpay.js
   sql/
@@ -99,11 +100,70 @@ Also keep existing keys already used by your backend:
     "amountPaise": 2000,
     "amountInr": 20,
     "currency": "INR"
+  },
+  "transaction": {
+    "qrId": "qr_...",
+    "status": "pending"
+  },
+  "persistence": {
+    "stored": true
   }
 }
 ```
 
-### 3) Verify Payment Signature
+### 3) Check QR Status (Provider + Persistence)
+
+- Endpoint: `GET /qr-status/:qrId?userId=user_123`
+- Supports both:
+  - QR ids (`qr_...`)
+  - Order ids (`order_...`) when frontend falls back to order-based polling
+- Behavior:
+  - fetches latest provider status
+  - updates tracked in-memory transaction state
+  - when paid, persists captured payment and updates user plan/wallet state
+
+- Success response (shape):
+
+```json
+{
+  "ok": true,
+  "paid": false,
+  "qr": {
+    "id": "qr_...",
+    "status": "active"
+  },
+  "payment": null,
+  "persistence": null,
+  "transaction": {
+    "qrId": "qr_...",
+    "status": "pending"
+  }
+}
+```
+
+### 4) Check Tracked Transaction State
+
+- Endpoint: `GET /transaction-status/:qrId`
+- Behavior:
+  - returns server-side tracked transaction snapshot (pending/paid/closed/expired/failed/cancelled)
+  - useful for frontend fallback polling and debugging webhook matching
+
+- Success response:
+
+```json
+{
+  "ok": true,
+  "found": true,
+  "transaction": {
+    "qrId": "qr_...",
+    "status": "paid",
+    "orderId": "order_...",
+    "paymentId": "pay_..."
+  }
+}
+```
+
+### 5) Verify Payment Signature
 
 - Endpoint: `POST /verify-payment`
 - Body:
@@ -134,11 +194,16 @@ Also keep existing keys already used by your backend:
   "persistence": {
     "stored": true,
     "userUpdated": true
-  }
+  },
+  "transaction": {
+    "qrId": "qr_...",
+    "status": "paid"
+  },
+  "transactionMatchedBy": "orderId"
 }
 ```
 
-### 4) Webhook
+### 6) Webhook
 
 - Endpoint: `POST /webhook`
 - Header: `x-razorpay-signature`
@@ -148,6 +213,8 @@ Also keep existing keys already used by your backend:
 - Behavior:
   - verifies webhook signature
   - stores payment in `payments` table
+  - matches webhook to pending QR transaction (by qrId/orderId/paymentId/user+amount fallback)
+  - transitions tracked transaction from `pending` to `paid`
   - best-effort updates user plan in `users`/`profiles` table
 
 ## Supabase Setup
@@ -196,13 +263,56 @@ curl -X POST http://localhost:8080/create-qr \
   -d '{"amount":20,"userId":"user_123"}'
 ```
 
-5. Verify payment (after frontend checkout completes)
+5. Check QR status while payment is pending
+
+```bash
+curl "http://localhost:8080/qr-status/qr_x?userId=user_123"
+```
+
+6. Check tracked transaction state
+
+```bash
+curl "http://localhost:8080/transaction-status/qr_x"
+```
+
+7. Verify payment (after frontend checkout completes)
 
 ```bash
 curl -X POST http://localhost:8080/verify-payment \
   -H "Content-Type: application/json" \
   -d '{"razorpay_order_id":"order_x","razorpay_payment_id":"pay_x","razorpay_signature":"sig_x","amount":10,"userId":"user_123"}'
 ```
+
+## End-to-End Razorpay Checklist (Steps 5-13)
+
+5. Backend creates dynamic QR via `POST /create-qr` and stores a `pending` transaction snapshot.
+6. Frontend shows returned QR image/UPI intent and starts polling.
+7. Frontend polls `GET /qr-status/:qrId` (and optionally `GET /transaction-status/:qrId`) until terminal state.
+8. Razorpay sends webhook event (`payment.captured` or `order.paid`) to `POST /webhook`.
+9. Backend verifies `x-razorpay-signature` using raw request body and `RAZORPAY_WEBHOOK_SECRET`.
+10. Backend matches webhook payment to pending transaction using qr/order/payment references with user+amount fallback.
+11. Backend marks transaction `pending -> paid`, persists captured payment row, and updates user paid state.
+12. Frontend sees `paid: true` / `transaction.status: paid`, then updates wallet/history/premium state once.
+13. Validate full flow on a public URL (ngrok or deployed app), including webhook delivery + signature verification.
+
+## Public Webhook Testing with ngrok
+
+1. Start backend locally on port `8080`.
+2. Expose backend publicly:
+
+```bash
+ngrok http 8080
+```
+
+3. Copy generated HTTPS URL and configure Razorpay webhook URL as:
+  - `https://<ngrok-id>.ngrok-free.app/webhook`
+4. In Razorpay dashboard (Test Mode), enable events:
+  - `payment.captured`
+  - `order.paid`
+5. Complete one QR test payment and verify:
+  - webhook delivery status is `200`
+  - `GET /qr-status/:qrId` returns `paid: true`
+  - `GET /transaction-status/:qrId` returns `status: paid`
 
 ## Azure App Service Deployment (Node 20)
 
