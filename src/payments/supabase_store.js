@@ -67,6 +67,19 @@ function normalizeUserId(value) {
 }
 
 /**
+ * Converts value to normalized email-like identifier.
+ * @param {unknown} value
+ * @returns {string}
+ */
+function normalizeEmailIdentifier(value) {
+  const safe = String(value || "").trim().toLowerCase().slice(0, 180);
+  if (!safe.includes("@")) {
+    return "";
+  }
+  return safe;
+}
+
+/**
  * Converts date-like value to ISO timestamp.
  * @param {number|string|Date|null|undefined} value
  * @returns {string}
@@ -246,9 +259,128 @@ async function markUserAsPaid(payload) {
   };
 }
 
+/**
+ * Upserts one backend user-registry marker row in payments table.
+ * Uses deterministic payment_id to keep one row per user.
+ * @param {{email:string,createdAt?:number|string|Date}} payload
+ * @returns {Promise<{stored:boolean,row?:object,reason?:string}>}
+ */
+async function upsertUserRegistryRecord(payload) {
+  if (!supabaseClient) {
+    return {
+      stored: false,
+      reason: "Supabase is not configured."
+    };
+  }
+
+  const email = normalizeEmailIdentifier(payload?.email);
+  if (!email) {
+    throw new Error("Valid email is required for user registry upsert.");
+  }
+
+  const paymentId = `user_registry:${email}`;
+  const rowPayload = {
+    user_id: email,
+    amount: 0,
+    status: "registered",
+    payment_id: paymentId,
+    created_at: toIsoTimestamp(payload?.createdAt)
+  };
+
+  const { data: rows, error } = await supabaseClient
+    .from("payments")
+    .upsert(rowPayload, {
+      onConflict: "payment_id"
+    })
+    .select("id,user_id,amount,status,payment_id,created_at")
+    .limit(1);
+
+  if (error) {
+    throw new Error(error.message || "Unable to upsert user registry row.");
+  }
+
+  return {
+    stored: true,
+    row: Array.isArray(rows) ? rows[0] : null
+  };
+}
+
+/**
+ * Lists unique known users from payments table by user_id.
+ * @param {number=} maxRows
+ * @returns {Promise<{ok:boolean,users:Array<object>,reason?:string}>}
+ */
+async function listKnownUsersFromPayments(maxRows = 5000) {
+  if (!supabaseClient) {
+    return {
+      ok: false,
+      users: [],
+      reason: "Supabase is not configured."
+    };
+  }
+
+  const safeLimit = Number.isFinite(Number(maxRows))
+    ? Math.max(1, Math.min(10000, Math.round(Number(maxRows))))
+    : 5000;
+
+  const { data, error } = await supabaseClient
+    .from("payments")
+    .select("user_id,status,payment_id,created_at")
+    .order("created_at", { ascending: false })
+    .limit(safeLimit);
+
+  if (error) {
+    throw new Error(error.message || "Unable to list known users from payments.");
+  }
+
+  const rows = Array.isArray(data) ? data : [];
+  const map = new Map();
+
+  for (const row of rows) {
+    const email = normalizeEmailIdentifier(row?.user_id);
+    if (!email) {
+      continue;
+    }
+
+    const createdMs = Date.parse(String(row?.created_at || "")) || Date.now();
+    const status = normalizeStatus(row?.status);
+    const paymentId = String(row?.payment_id || "").trim();
+    const current = map.get(email);
+
+    if (!current) {
+      map.set(email, {
+        email,
+        firstSeenAt: createdMs,
+        lastSeenAt: createdMs,
+        sourceStatus: status,
+        sourcePaymentId: paymentId
+      });
+      continue;
+    }
+
+    if (createdMs < current.firstSeenAt) {
+      current.firstSeenAt = createdMs;
+    }
+    if (createdMs > current.lastSeenAt) {
+      current.lastSeenAt = createdMs;
+      current.sourceStatus = status;
+      current.sourcePaymentId = paymentId;
+    }
+  }
+
+  const users = [...map.values()].sort((a, b) => Number(b.lastSeenAt || 0) - Number(a.lastSeenAt || 0));
+
+  return {
+    ok: true,
+    users
+  };
+}
+
 module.exports = {
   isConfigured,
   verifyPaymentsTableAccess,
   upsertPaymentRecord,
-  markUserAsPaid
+  markUserAsPaid,
+  upsertUserRegistryRecord,
+  listKnownUsersFromPayments
 };

@@ -15,6 +15,9 @@ const {
   getIntegrationState,
   verifyPaymentsTableAccess
 } = require("./src/routes/razorpay");
+const {
+  usersRouter
+} = require("./src/routes/users");
 
 const app = express();
 const port = Number(process.env.PORT || 8080);
@@ -316,6 +319,7 @@ app.post("/webhook", express.raw({ type: "application/json" }), razorpayWebhookH
 
 app.use(express.json());
 
+app.use("/", usersRouter);
 app.use("/", razorpayRouter);
 
 app.post("/stripe/create-checkout-session", async (req, res) => {
