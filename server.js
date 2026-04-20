@@ -214,7 +214,7 @@ function sendRazorpayWebhookStatus(req, res) {
   });
 }
 
-app.get("/health", async (req, res) => {
+async function sendHealthStatus(req, res) {
   if (shouldRenderHealthHtml(req)) {
     res.setHeader("Cache-Control", "no-store");
     res.sendFile(path.join(__dirname, "public", "health.html"));
@@ -223,6 +223,12 @@ app.get("/health", async (req, res) => {
 
   const payload = await buildHealthPayload();
   res.json(payload);
+}
+
+app.get("/", sendHealthStatus);
+
+app.get("/health", async (req, res) => {
+  await sendHealthStatus(req, res);
 });
 
 app.get("/health.json", async (_req, res) => {
