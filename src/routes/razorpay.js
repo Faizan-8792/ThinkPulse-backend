@@ -29,6 +29,10 @@ const {
   markUserAsPaid
 } = require("../payments/supabase_store");
 const {
+  creditWallet,
+  getWalletSnapshot
+} = require("../payments/wallet_store");
+const {
   recordPendingTransaction,
   updateTransactionFromQrStatus,
   markTrackedTransactionPaid,
@@ -169,6 +173,24 @@ async function persistPaymentAndPlan(payload) {
     userReason: userUpdate.reason || ""
   };
 }
+
+router.get("/wallet/:userId", (req, res) => {
+  const userId = toSafeString(req.params?.userId, 180).toLowerCase();
+  if (!userId) {
+    res.status(400).json({
+      ok: false,
+      error: "userId route param is required."
+    });
+    return;
+  }
+
+  const wallet = getWalletSnapshot(userId);
+  res.json({
+    ok: true,
+    userId,
+    balance: Number(wallet?.balance || 0)
+  });
+});
 
 router.post("/create-order", async (req, res) => {
   if (!isRazorpayConfigured()) {
@@ -752,8 +774,11 @@ async function razorpayWebhookHandler(req, res) {
     return;
   }
 
+  const webhookPath = toSafeString(req.originalUrl || req.path || "/webhooks", 140) || "/webhooks";
+
   const signature = toSafeString(req.headers["x-razorpay-signature"], 200);
   if (!signature) {
+    console.warn(`[razorpay-webhook] signature path=${webhookPath} valid=false reason=missing_header`);
     res.status(400).json({
       ok: false,
       error: "Missing x-razorpay-signature header."
@@ -766,6 +791,7 @@ async function razorpayWebhookHandler(req, res) {
     : Buffer.from(String(req.body || ""), "utf8");
 
   const isValid = verifyWebhookSignature(rawBody, signature);
+  console.info(`[razorpay-webhook] signature path=${webhookPath} valid=${isValid ? "true" : "false"}`);
   if (!isValid) {
     res.status(401).json({
       ok: false,
@@ -786,11 +812,13 @@ async function razorpayWebhookHandler(req, res) {
   }
 
   const eventType = toSafeString(event?.event, 80);
+  console.info(`[razorpay-webhook] event_received type=${eventType || "unknown"}`);
 
   try {
     let transaction = null;
     let transactionMatchedBy = "none";
     let persistence = null;
+    let wallet = null;
 
     if (eventType === "payment.captured") {
       const payment = event?.payload?.payment?.entity || {};
@@ -810,6 +838,26 @@ async function razorpayWebhookHandler(req, res) {
           amountInr,
           createdAt: payment.created_at
         });
+      }
+
+      const walletUserId = toSafeString(userId, 180).toLowerCase();
+      if (walletUserId && amountInr && paymentId) {
+        wallet = await creditWallet({
+          userId: walletUserId,
+          amountInr,
+          paymentId,
+          orderId,
+          source: "payment.captured"
+        });
+      } else {
+        wallet = {
+          applied: false,
+          reason: !walletUserId
+            ? "missing_user_id"
+            : !amountInr
+              ? "invalid_amount"
+              : "missing_payment_id"
+        };
       }
 
       const tracked = markTrackedTransactionPaid({
@@ -835,6 +883,10 @@ async function razorpayWebhookHandler(req, res) {
           createdAt: payment.created_at
         }).catch(() => undefined);
       }
+
+      console.info(
+        `[razorpay-webhook] event=payment.captured paymentId=${paymentId || "na"} orderId=${orderId || "na"} userId=${walletUserId || "na"} amountInr=${amountInr || 0} walletApplied=${wallet?.applied === true}`
+      );
     } else if (eventType === "order.paid") {
       const order = event?.payload?.order?.entity || {};
       const payment = event?.payload?.payment?.entity || {};
@@ -854,6 +906,26 @@ async function razorpayWebhookHandler(req, res) {
           amountInr,
           createdAt: payment.created_at || order.created_at
         });
+      }
+
+      const walletUserId = toSafeString(userId, 180).toLowerCase();
+      if (walletUserId && amountInr && paymentId) {
+        wallet = await creditWallet({
+          userId: walletUserId,
+          amountInr,
+          paymentId,
+          orderId,
+          source: "order.paid"
+        });
+      } else {
+        wallet = {
+          applied: false,
+          reason: !walletUserId
+            ? "missing_user_id"
+            : !amountInr
+              ? "invalid_amount"
+              : "missing_payment_id"
+        };
       }
 
       const tracked = markTrackedTransactionPaid({
@@ -879,6 +951,62 @@ async function razorpayWebhookHandler(req, res) {
           createdAt: payment.created_at || order.created_at
         }).catch(() => undefined);
       }
+
+      console.info(
+        `[razorpay-webhook] event=order.paid paymentId=${paymentId || "na"} orderId=${orderId || "na"} userId=${walletUserId || "na"} amountInr=${amountInr || 0} walletApplied=${wallet?.applied === true}`
+      );
+    } else if (eventType === "payment.failed") {
+      const payment = event?.payload?.payment?.entity || {};
+      const paymentId = toSafeString(payment.id, 120);
+      const orderId = toSafeString(payment.order_id, 120);
+      const userId = pickUserId(payment?.notes);
+      const kind = String(payment?.notes?.kind || "").trim().toLowerCase() === "wallet_topup"
+        ? "wallet_topup"
+        : "plan_purchase";
+      const amountInr = resolveAmountInr(null, payment.amount);
+      const failureCode = toSafeString(
+        payment?.error_code || payment?.error_reason || payment?.error_description,
+        180
+      ) || "unknown";
+
+      wallet = {
+        applied: false,
+        reason: "payment_failed"
+      };
+
+      const tracked = getTrackedTransactionByRefs({
+        orderId,
+        paymentId,
+        userId,
+        amountInr: amountInr || 0
+      });
+      transactionMatchedBy = tracked.matchedBy;
+
+      if (tracked.transaction?.qrId) {
+        transaction = updateTransactionFromQrStatus({
+          qrId: tracked.transaction.qrId,
+          orderId,
+          paymentId,
+          userId,
+          amountInr: amountInr || 0,
+          kind,
+          providerStatus: "failed",
+          providerEvent: "payment.failed",
+          failureReason: failureCode,
+          paid: false,
+          createdAt: payment.created_at
+        });
+      }
+
+      console.warn(
+        `[razorpay-webhook] event=payment.failed paymentId=${paymentId || "na"} orderId=${orderId || "na"} userId=${toSafeString(userId, 180).toLowerCase() || "na"} amountInr=${amountInr || 0} reason=${failureCode}`
+      );
+    } else {
+      wallet = {
+        applied: false,
+        reason: "ignored_event"
+      };
+      console.info(`[razorpay-webhook] event=${eventType || "unknown"} ignored=true`);
     }
 
     res.json({
@@ -886,6 +1014,7 @@ async function razorpayWebhookHandler(req, res) {
       received: true,
       event: eventType,
       persistence,
+      wallet,
       transaction,
       transactionMatchedBy
     });

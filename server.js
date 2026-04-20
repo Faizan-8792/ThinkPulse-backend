@@ -86,7 +86,7 @@ const urls = {
   privacy: resolveUrl("PRIVACY_URL", "/privacy"),
   refund: resolveUrl("REFUND_POLICY_URL", "/refund-policy"),
   stripeWebhook: resolveUrl("WEBHOOK_URL", "/stripe/webhook"),
-  razorpayWebhook: resolveUrl("RAZORPAY_WEBHOOK_URL", "/webhook"),
+  razorpayWebhook: resolveUrl("RAZORPAY_WEBHOOK_URL", "/webhooks"),
   success: resolveUrl("SUCCESS_URL", "/billing/success"),
   cancel: resolveUrl("CANCEL_URL", "/billing/cancel")
 };
@@ -154,11 +154,13 @@ app.use(helmet({
 }));
 app.use(cors({
   origin(origin, callback) {
-    if (!origin || corsOrigins.length === 0 || corsOrigins.includes(origin)) {
+    const safeOrigin = String(origin || "").trim();
+    const isChromeExtension = safeOrigin.startsWith("chrome-extension://");
+    if (!safeOrigin || corsOrigins.length === 0 || corsOrigins.includes(safeOrigin) || isChromeExtension) {
       callback(null, true);
       return;
     }
-    callback(new Error("CORS blocked for origin: " + origin));
+    callback(new Error("CORS blocked for origin: " + safeOrigin));
   }
 }));
 
@@ -189,6 +191,27 @@ function shouldRenderHealthHtml(req) {
 
   const accept = String(req.headers?.accept || "").toLowerCase();
   return accept.includes("text/html");
+}
+
+function sendRazorpayWebhookStatus(req, res) {
+  if (shouldRenderHealthHtml(req)) {
+    res.setHeader("Cache-Control", "no-store");
+    res.sendFile(path.join(__dirname, "public", "razorpay-webhook.html"));
+    return;
+  }
+
+  const integrationState = getIntegrationState();
+  res.json({
+    ok: true,
+    service: "thinkpulse-backend",
+    message: "Razorpay webhook endpoint is active. Configure Razorpay to send POST requests here.",
+    endpoint: "/webhooks",
+    aliases: ["/webhook"],
+    method: "POST",
+    signatureHeader: "x-razorpay-signature",
+    razorpayConfigured: integrationState.razorpayConfigured,
+    timestamp: Date.now()
+  });
 }
 
 app.get("/health", async (req, res) => {
@@ -277,9 +300,8 @@ app.get("/stripe/webhook", (_req, res) => {
   res.sendFile(path.join(__dirname, "public", "stripe-webhook.html"));
 });
 
-app.get("/webhook", (_req, res) => {
-  res.sendFile(path.join(__dirname, "public", "razorpay-webhook.html"));
-});
+app.get("/webhook", sendRazorpayWebhookStatus);
+app.get("/webhooks", sendRazorpayWebhookStatus);
 
 app.post("/stripe/webhook", express.raw({ type: "application/json" }), (req, res) => {
   if (!stripe || !webhookSecret) {
@@ -315,7 +337,9 @@ app.post("/stripe/webhook", express.raw({ type: "application/json" }), (req, res
   res.json({ received: true });
 });
 
-app.post("/webhook", express.raw({ type: "application/json" }), razorpayWebhookHandler);
+const rawJsonWebhookParser = express.raw({ type: "application/json" });
+app.post("/webhook", rawJsonWebhookParser, razorpayWebhookHandler);
+app.post("/webhooks", rawJsonWebhookParser, razorpayWebhookHandler);
 
 app.use(express.json());
 
