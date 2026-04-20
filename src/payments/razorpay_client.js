@@ -196,6 +196,59 @@ async function createSingleUseQr(payload) {
 }
 
 /**
+ * Creates a Razorpay payment link fallback for accounts where QR APIs are unavailable.
+ * @param {{amountInr:number,userId:string,description?:string,allowCustomAmount?:boolean,kind?:string}} payload
+ * @returns {Promise<any>}
+ */
+async function createPaymentLink(payload) {
+  assertConfigured();
+
+  const allowCustomAmount = Boolean(payload?.allowCustomAmount);
+  const amountInr = allowCustomAmount
+    ? normalizeWalletTopupAmountInr(payload?.amountInr)
+    : normalizeAmountInr(payload?.amountInr);
+  if (!amountInr) {
+    throw new Error(
+      allowCustomAmount
+        ? "Amount must be a whole number between 10 and 10000 INR."
+        : "Amount must be 10 or 20 INR."
+    );
+  }
+
+  const userId = toSafeNote(payload?.userId);
+  if (!userId) {
+    throw new Error("userId is required.");
+  }
+
+  const kind = String(payload?.kind || (allowCustomAmount ? "wallet_topup" : "plan_purchase")).trim().toLowerCase() === "wallet_topup"
+    ? "wallet_topup"
+    : "plan_purchase";
+  const plan = resolvePlanByAmount(amountInr) || (kind === "wallet_topup" ? "wallet" : "basic");
+  const nowSec = Math.floor(Date.now() / 1000);
+  const expireBy = nowSec + (20 * 60);
+
+  return razorpayClient.paymentLink.create({
+    amount: toPaise(amountInr),
+    currency: "INR",
+    accept_partial: false,
+    upi_link: true,
+    expire_by: expireBy,
+    reference_id: buildReceipt(kind === "wallet_topup" ? "tp_topup" : "tp_plan"),
+    description: toSafeNote(payload?.description) || `ThinkPulse ${kind === "wallet_topup" ? "wallet top-up" : plan} payment`,
+    notify: {
+      sms: false,
+      email: false
+    },
+    notes: {
+      userId,
+      plan,
+      kind,
+      source: "thinkpulse-extension"
+    }
+  });
+}
+
+/**
  * Fetches Razorpay QR details by id.
  * @param {string} qrId
  * @returns {Promise<any>}
@@ -235,6 +288,20 @@ async function fetchPayment(paymentId) {
     throw new Error("paymentId is required.");
   }
   return razorpayClient.payments.fetch(safePaymentId);
+}
+
+/**
+ * Fetches Razorpay payment link details.
+ * @param {string} paymentLinkId
+ * @returns {Promise<any>}
+ */
+async function fetchPaymentLink(paymentLinkId) {
+  assertConfigured();
+  const safePaymentLinkId = toSafeNote(paymentLinkId);
+  if (!safePaymentLinkId) {
+    throw new Error("paymentLinkId is required.");
+  }
+  return razorpayClient.paymentLink.fetch(safePaymentLinkId);
 }
 
 /**
@@ -297,8 +364,10 @@ module.exports = {
   getPublicKeyId,
   createOrder,
   createSingleUseQr,
+  createPaymentLink,
   fetchQrCode,
   fetchOrder,
+  fetchPaymentLink,
   fetchPayment,
   verifyPaymentSignature,
   verifyWebhookSignature

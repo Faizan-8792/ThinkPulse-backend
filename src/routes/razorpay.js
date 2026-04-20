@@ -16,8 +16,10 @@ const {
   getPublicKeyId,
   createOrder,
   createSingleUseQr,
+  createPaymentLink,
   fetchQrCode,
   fetchOrder,
+  fetchPaymentLink,
   fetchPayment,
   verifyPaymentSignature,
   verifyWebhookSignature
@@ -128,6 +130,17 @@ function extractProviderErrorDetails(error) {
     providerCode: toSafeString(error?.error?.code || "", 80),
     providerReason: toSafeString(error?.error?.reason || "", 120)
   };
+}
+
+/**
+ * Returns true when provider error indicates QR endpoint is unavailable for account.
+ * @param {any} error
+ * @returns {boolean}
+ */
+function isQrApiUnavailableError(error) {
+  const message = String(error?.error?.description || error?.message || "").trim().toLowerCase();
+  const code = String(error?.error?.code || "").trim().toUpperCase();
+  return code === "BAD_REQUEST_ERROR" && message.includes("requested url was not found");
 }
 
 /**
@@ -285,31 +298,65 @@ router.post("/create-qr", async (req, res) => {
     return;
   }
 
+  const description = toSafeString(
+    req.body?.description ||
+      (kind === "wallet_topup"
+        ? `ThinkPulse wallet top-up Rs ${amountInr}`
+        : `ThinkPulse ${amountInr === 20 ? "Premium" : "Basic"} plan Rs ${amountInr}`),
+    180
+  );
+
   try {
-    const qr = await createSingleUseQr({
-      amountInr,
-      userId,
-      allowCustomAmount: kind === "wallet_topup",
-      kind,
-      description: toSafeString(
-        req.body?.description ||
-          (kind === "wallet_topup"
-            ? `ThinkPulse wallet top-up Rs ${amountInr}`
-            : `ThinkPulse ${amountInr === 20 ? "Premium" : "Basic"} plan Rs ${amountInr}`),
-        180
-      )
-    });
+    let provider = "qr_code";
+    let qr = null;
+
+    try {
+      qr = await createSingleUseQr({
+        amountInr,
+        userId,
+        allowCustomAmount: kind === "wallet_topup",
+        kind,
+        description
+      });
+    } catch (error) {
+      if (!isQrApiUnavailableError(error)) {
+        throw error;
+      }
+
+      provider = "payment_link";
+      qr = await createPaymentLink({
+        amountInr,
+        userId,
+        allowCustomAmount: kind === "wallet_topup",
+        kind,
+        description
+      });
+    }
 
     const qrId = toSafeString(qr?.id, 140);
-    const orderId = toSafeString(qr?.order_id || qr?.orderId, 140);
-    const imageUrl = toSafeString(qr?.image_url || qr?.imageUrl, 2000);
-    const upiIntent = toSafeString(qr?.payment_url || qr?.upiIntent || qr?.upi_intent, 2000);
-    const amountPaise = Math.max(0, Number(qr?.payment_amount || qr?.amount || Math.round(amountInr * 100)));
+    const orderId = provider === "payment_link"
+      ? ""
+      : toSafeString(qr?.order_id || qr?.orderId, 140);
+    const imageUrl = provider === "payment_link"
+      ? ""
+      : toSafeString(qr?.image_url || qr?.imageUrl, 2000);
+    const upiIntent = provider === "payment_link"
+      ? toSafeString(qr?.short_url || qr?.shortUrl, 2000)
+      : toSafeString(qr?.payment_url || qr?.upiIntent || qr?.upi_intent, 2000);
+    const amountPaise = provider === "payment_link"
+      ? Math.max(0, Number(qr?.amount || Math.round(amountInr * 100)))
+      : Math.max(0, Number(qr?.payment_amount || qr?.amount || Math.round(amountInr * 100)));
     const safeAmountInr = Number(fromPaise(amountPaise)) || amountInr;
-    const closeBy = Math.max(0, Number(qr?.close_by || qr?.closeBy) || 0);
+    const closeBy = provider === "payment_link"
+      ? Math.max(0, Number(qr?.expire_by) || 0)
+      : Math.max(0, Number(qr?.close_by || qr?.closeBy) || 0);
     const createdAtSec = Math.max(0, Number(qr?.created_at || qr?.createdAt) || 0);
-    const amountReceivedPaise = Math.max(0, Number(qr?.payments_amount_received) || 0);
-    const paymentsCountReceived = Math.max(0, Number(qr?.payments_count_received) || 0);
+    const amountReceivedPaise = provider === "payment_link"
+      ? Math.max(0, Number(qr?.amount_paid) || 0)
+      : Math.max(0, Number(qr?.payments_amount_received) || 0);
+    const paymentsCountReceived = provider === "payment_link"
+      ? (Array.isArray(qr?.payments) ? qr.payments.length : (amountReceivedPaise > 0 ? 1 : 0))
+      : Math.max(0, Number(qr?.payments_count_received) || 0);
 
     const transaction = qrId
       ? recordPendingTransaction({
@@ -320,7 +367,7 @@ router.post("/create-qr", async (req, res) => {
           kind,
           closeByMs: closeBy > 0 ? closeBy * 1000 : 0,
           providerStatus: String(qr?.status || "created").toLowerCase(),
-          providerEvent: "create_qr",
+          providerEvent: provider === "payment_link" ? "create_payment_link" : "create_qr",
           createdAt: createdAtSec > 0 ? createdAtSec * 1000 : Date.now()
         })
       : null;
@@ -359,7 +406,8 @@ router.post("/create-qr", async (req, res) => {
         amountReceivedPaise,
         paymentsCountReceived,
         currency: toSafeString(qr?.currency || "INR", 10) || "INR",
-        kind
+        kind,
+        provider
       },
       transaction,
       persistence: pendingPersistence
@@ -434,6 +482,7 @@ router.get("/qr-status/:qrId", async (req, res) => {
 
   try {
     const isOrderReference = qrId.startsWith("order_");
+    const isPaymentLinkReference = qrId.startsWith("plink_");
 
     if (isOrderReference) {
       const order = await fetchOrder(qrId);
@@ -523,6 +572,93 @@ router.get("/qr-status/:qrId", async (req, res) => {
             status: "captured",
             amountInr: amountInr || null,
             userId: orderUserId || requesterUserId || "",
+            kind
+          }
+          : null,
+        persistence,
+        transaction
+      });
+      return;
+    }
+
+    if (isPaymentLinkReference) {
+      const paymentLink = await fetchPaymentLink(qrId);
+      const paymentLinkUserId = pickUserId(paymentLink?.notes);
+
+      if (
+        requesterUserId &&
+        paymentLinkUserId &&
+        requesterUserId.toLowerCase() !== paymentLinkUserId.toLowerCase()
+      ) {
+        res.status(403).json({
+          ok: false,
+          error: "Payment link does not belong to requested user."
+        });
+        return;
+      }
+
+      const paymentLinkStatus = toSafeString(paymentLink?.status, 40).toLowerCase() || "created";
+      const kind = toSafeString(paymentLink?.notes?.kind, 40).toLowerCase() || "plan_purchase";
+      const amountPaise = Math.max(0, Number(paymentLink?.amount) || 0);
+      const amountReceivedPaise = Math.max(0, Number(paymentLink?.amount_paid) || 0);
+      const paymentsCountReceived = Array.isArray(paymentLink?.payments)
+        ? paymentLink.payments.length
+        : (amountReceivedPaise > 0 ? 1 : 0);
+      const amountInr = resolveAmountInr(null, amountPaise);
+      const paid = Boolean(
+        paymentLinkStatus === "paid" &&
+          amountPaise > 0 &&
+          amountReceivedPaise >= amountPaise
+      );
+
+      let persistence = null;
+      if (paid && amountInr) {
+        persistence = await persistPaymentAndPlan({
+          userId: paymentLinkUserId || requesterUserId,
+          paymentId: `plink_${qrId}`,
+          status: "captured",
+          amountInr,
+          createdAt: paymentLink?.paid_at || paymentLink?.updated_at || paymentLink?.created_at
+        });
+      }
+
+      const transaction = updateTransactionFromQrStatus({
+        qrId,
+        orderId: "",
+        paymentId: paid ? `plink_${qrId}` : "",
+        userId: paymentLinkUserId || requesterUserId,
+        amountInr: amountInr || 0,
+        kind,
+        closeByMs: Number(paymentLink?.expire_by || 0) > 0 ? Number(paymentLink.expire_by) * 1000 : 0,
+        providerStatus: paymentLinkStatus,
+        providerEvent: "payment_link_status",
+        paid,
+        createdAt: paymentLink?.created_at,
+        paidAt: paymentLink?.paid_at || paymentLink?.updated_at
+      });
+
+      res.json({
+        ok: true,
+        paid,
+        qr: {
+          id: qrId,
+          status: paymentLinkStatus,
+          closeBy: Number(paymentLink?.expire_by) || 0,
+          closedAt: Number(paymentLink?.paid_at || paymentLink?.expired_at || 0) || 0,
+          closeReason: "",
+          amountPaise,
+          amountInr: amountInr || null,
+          amountReceivedPaise,
+          paymentsCountReceived,
+          userId: paymentLinkUserId || "",
+          kind
+        },
+        payment: paid
+          ? {
+            id: `plink_${qrId}`,
+            status: "captured",
+            amountInr: amountInr || null,
+            userId: paymentLinkUserId || requesterUserId || "",
             kind
           }
           : null,
