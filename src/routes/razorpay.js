@@ -452,7 +452,7 @@ router.post("/create-qr", async (req, res) => {
       : toSafeString(qr?.image_url || qr?.imageUrl, 2000);
     const upiIntent = provider === "payment_link"
       ? toSafeString(qr?.short_url || qr?.shortUrl, 2000)
-      : toSafeString(qr?.payment_url || qr?.upiIntent || qr?.upi_intent, 2000);
+      : toSafeString(qr?.image_content || qr?.payment_url || qr?.upiIntent || qr?.upi_intent, 2000);
     const amountPaise = provider === "payment_link"
       ? Math.max(0, Number(qr?.amount || Math.round(amountInr * 100)))
       : Math.max(0, Number(qr?.payment_amount || qr?.amount || Math.round(amountInr * 100)));
