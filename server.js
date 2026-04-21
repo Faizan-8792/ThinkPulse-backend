@@ -91,6 +91,25 @@ const urls = {
   cancel: resolveUrl("CANCEL_URL", "/billing/cancel")
 };
 
+/**
+ * Returns true when value is valid http/https URL.
+ * @param {string} value
+ * @returns {boolean}
+ */
+function isHttpUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return false;
+  }
+
+  try {
+    const parsed = new URL(raw);
+    return /^https?:$/i.test(parsed.protocol);
+  } catch (_error) {
+    return false;
+  }
+}
+
 const envBootstrapConfig = {
   adminPool: {
     openrouter: parseEnvList("ADMIN_OPENROUTER_KEYS", 30),
@@ -148,6 +167,60 @@ const corsOrigins = String(process.env.CORS_ORIGINS || "")
   .map((item) => item.trim())
   .filter(Boolean);
 
+/**
+ * Validates runtime environment for payment and webhook flows.
+ * @returns {{errors:string[],warnings:string[]}}
+ */
+function validateRuntimeConfig() {
+  const errors = [];
+  const warnings = [];
+  const nodeEnv = String(process.env.NODE_ENV || "development").trim().toLowerCase();
+
+  const razorpayKeyId = readEnv("RAZORPAY_KEY_ID", "");
+  const razorpayKeySecret = readEnv("RAZORPAY_KEY_SECRET", "");
+  const razorpayWebhookSecret = readEnv("RAZORPAY_WEBHOOK_SECRET", "");
+  const razorpayConfigCount = [razorpayKeyId, razorpayKeySecret, razorpayWebhookSecret]
+    .filter(Boolean)
+    .length;
+
+  if (razorpayConfigCount > 0 && razorpayConfigCount < 3) {
+    errors.push("Razorpay configuration is partial. Set RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET, and RAZORPAY_WEBHOOK_SECRET together.");
+  }
+
+  if (publicBaseUrl && !isHttpUrl(publicBaseUrl)) {
+    errors.push("PUBLIC_BASE_URL must be a valid http/https URL.");
+  }
+
+  if (urls.razorpayWebhook) {
+    if (!isHttpUrl(urls.razorpayWebhook)) {
+      errors.push("RAZORPAY_WEBHOOK_URL must be a valid http/https URL when set.");
+    } else {
+      const webhookPath = new URL(urls.razorpayWebhook).pathname;
+      if (!/^\/webhooks?$/.test(webhookPath)) {
+        warnings.push("RAZORPAY_WEBHOOK_URL path should be /webhooks (or /webhook alias) to match backend routes.");
+      }
+    }
+  }
+
+  if (nodeEnv === "production" && corsOrigins.length === 0) {
+    warnings.push("CORS_ORIGINS is empty in production. This allows broad cross-origin access.");
+  }
+
+  return {
+    errors,
+    warnings
+  };
+}
+
+const runtimeConfigValidation = validateRuntimeConfig();
+
+for (const warning of runtimeConfigValidation.warnings) {
+  console.warn("[config-warning]", warning);
+}
+for (const error of runtimeConfigValidation.errors) {
+  console.error("[config-error]", error);
+}
+
 app.disable("x-powered-by");
 app.use(helmet({
   contentSecurityPolicy: false
@@ -175,6 +248,10 @@ async function buildHealthPayload() {
     stripeConfigured: Boolean(stripe),
     razorpayConfigured: integrationState.razorpayConfigured,
     supabaseConfigured: integrationState.supabaseConfigured,
+    configValidation: {
+      errors: runtimeConfigValidation.errors,
+      warnings: runtimeConfigValidation.warnings
+    },
     paymentsTable,
     timestamp: Date.now()
   };
@@ -210,6 +287,10 @@ function sendRazorpayWebhookStatus(req, res) {
     method: "POST",
     signatureHeader: "x-razorpay-signature",
     razorpayConfigured: integrationState.razorpayConfigured,
+    configValidation: {
+      errors: runtimeConfigValidation.errors,
+      warnings: runtimeConfigValidation.warnings
+    },
     timestamp: Date.now()
   });
 }

@@ -6,7 +6,9 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "check:razorpay": "node scripts/razorpay_integration_check.js",
+    "check:razorpay:full": "node scripts/razorpay_integration_check.js --full=true"
   },
   "engines": {
     "node": ">=20"

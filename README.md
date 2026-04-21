@@ -321,6 +321,35 @@ curl -X POST http://localhost:8080/verify-payment \
 12. Frontend sees `paid: true` / `transaction.status: paid`, then updates wallet/history/premium state once.
 13. Validate full flow on a public URL (ngrok or deployed app), including webhook delivery + signature verification.
 
+## Automated Integration Verification
+
+Run smoke checks against a running backend:
+
+```bash
+npm run check:razorpay
+```
+
+Run full checks (creates QR, validates webhook signature, duplicate webhook idempotency, and pending transaction transition):
+
+```bash
+npm run check:razorpay:full
+```
+
+Optional arguments:
+
+```bash
+node scripts/razorpay_integration_check.js --baseUrl=http://127.0.0.1:8080 --userId=test@example.com --amount=10 --create-qr=true --idempotency-test=true
+```
+
+What this verifies:
+
+- backend health and webhook status endpoints
+- no-store cache headers on transaction/status polling endpoints
+- invalid and valid Razorpay webhook signature handling
+- duplicate `payment.captured` webhook idempotency
+- pending transaction transition to `paid` (when QR reference is available)
+- verify-payment signature rejection path
+
 ## Chrome Extension Fetch Snippets
 
 Use these in popup/background scripts (replace `BACKEND_BASE_URL` with your deployed URL).
