@@ -453,6 +453,13 @@ router.post("/create-qr", async (req, res) => {
     const upiIntent = provider === "payment_link"
       ? toSafeString(qr?.short_url || qr?.shortUrl, 2000)
       : toSafeString(qr?.image_content || qr?.payment_url || qr?.upiIntent || qr?.upi_intent, 2000);
+    if (provider === "qr_code" && imageUrl && !upiIntent) {
+      console.warn("[RazorpayQR] QR created without image_content. Plain QR rendering will not be possible.", {
+        qrId,
+        provider,
+        amountInr
+      });
+    }
     const amountPaise = provider === "payment_link"
       ? Math.max(0, Number(qr?.amount || Math.round(amountInr * 100)))
       : Math.max(0, Number(qr?.payment_amount || qr?.amount || Math.round(amountInr * 100)));
