@@ -185,7 +185,7 @@ async function upsertPaymentRecord(payload) {
  * @param {{userId:string,plan:string}} payload
  * @returns {Promise<{updated:boolean,table?:string,column?:string,reason?:string}>}
  */
-async function markUserAsPaid(payload) {
+async function setUserPlanState(payload) {
   if (!supabaseClient) {
     return {
       updated: false,
@@ -255,6 +255,80 @@ async function markUserAsPaid(payload) {
 
   return {
     updated: false,
+    reason: "No matching users/profiles row found for this user identifier."
+  };
+}
+
+/**
+ * Best-effort user-plan update for paid users.
+ * @param {{userId:string,plan:string}} payload
+ * @returns {Promise<{updated:boolean,table?:string,column?:string,reason?:string}>}
+ */
+async function markUserAsPaid(payload) {
+  return setUserPlanState(payload);
+}
+
+/**
+ * Reads plan field from users/profiles table for one user identifier.
+ * @param {{userId:string}} payload
+ * @returns {Promise<{found:boolean,plan?:string,table?:string,column?:string,reason?:string}>}
+ */
+async function getUserPlanState(payload) {
+  if (!supabaseClient) {
+    return {
+      found: false,
+      reason: "Supabase is not configured."
+    };
+  }
+
+  const userId = normalizeUserId(payload?.userId);
+  if (!userId) {
+    return {
+      found: false,
+      reason: "Missing userId."
+    };
+  }
+
+  const attempts = [
+    { table: "users", column: "id" },
+    { table: "users", column: "user_id" },
+    { table: "users", column: "email" },
+    { table: "profiles", column: "id" },
+    { table: "profiles", column: "user_id" },
+    { table: "profiles", column: "email" }
+  ];
+
+  for (const attempt of attempts) {
+    const { data: rows, error } = await supabaseClient
+      .from(attempt.table)
+      .select("plan")
+      .eq(attempt.column, userId)
+      .limit(1);
+
+    if (error) {
+      if (isSchemaError(error)) {
+        continue;
+      }
+      return {
+        found: false,
+        reason: error.message || "Unable to read user plan state."
+      };
+    }
+
+    const row = Array.isArray(rows) && rows.length ? rows[0] : null;
+    const plan = String(row?.plan || "").trim().toLowerCase();
+    if (plan) {
+      return {
+        found: true,
+        plan,
+        table: attempt.table,
+        column: attempt.column
+      };
+    }
+  }
+
+  return {
+    found: false,
     reason: "No matching users/profiles row found for this user identifier."
   };
 }
@@ -381,6 +455,8 @@ module.exports = {
   verifyPaymentsTableAccess,
   upsertPaymentRecord,
   markUserAsPaid,
+  setUserPlanState,
+  getUserPlanState,
   upsertUserRegistryRecord,
   listKnownUsersFromPayments
 };

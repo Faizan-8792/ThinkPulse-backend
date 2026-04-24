@@ -18,6 +18,9 @@ const {
 const {
   usersRouter
 } = require("./src/routes/users");
+const {
+  rewardsRouter
+} = require("./src/routes/rewards");
 
 const app = express();
 const port = Number(process.env.PORT || 8080);
@@ -431,6 +434,7 @@ app.post("/webhooks", rawJsonWebhookParser, razorpayWebhookHandler);
 app.use(express.json());
 
 app.use("/", usersRouter);
+app.use("/", rewardsRouter);
 app.use("/", razorpayRouter);
 
 app.post("/stripe/create-checkout-session", async (req, res) => {

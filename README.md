@@ -36,6 +36,8 @@ Required for Razorpay payment flow:
 - `RAZORPAY_WEBHOOK_SECRET`
 - `RAZORPAY_WEBHOOK_URL` (optional override, defaults to `/webhooks` under `PUBLIC_BASE_URL`)
 - `WALLET_STORE_PATH` (optional absolute/relative path for JSON wallet persistence)
+- `REWARDS_STORE_PATH` (optional absolute/relative path for promo/reward JSON persistence)
+- `THINKPULSE_DATA_DIR` (optional writable root used by default JSON stores on hosted deployments)
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY` (preferred) or `SUPABASE_SECRET_KEY` fallback
 

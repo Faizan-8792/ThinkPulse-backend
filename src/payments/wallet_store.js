@@ -2,13 +2,10 @@
 
 const fs = require("fs");
 const path = require("path");
+const { resolveStorePath } = require("../storage/store_path");
 
 const MAX_PROCESSED_PAYMENTS = 20000;
-const defaultStorePath = path.join(__dirname, "..", "..", "data", "wallets.json");
-const configuredStorePath = String(process.env.WALLET_STORE_PATH || "").trim();
-const walletStorePath = configuredStorePath
-  ? path.resolve(configuredStorePath)
-  : defaultStorePath;
+const walletStorePath = resolveStorePath(process.env.WALLET_STORE_PATH, "wallets.json");
 
 let store = {
   wallets: {},
@@ -226,12 +223,14 @@ function ensureLoaded() {
 function persistStore() {
   const snapshot = JSON.stringify(store, null, 2);
   persistQueue = persistQueue
+    .catch(() => undefined)
     .then(async () => {
       await fs.promises.mkdir(path.dirname(walletStorePath), { recursive: true });
       await fs.promises.writeFile(walletStorePath, snapshot, "utf8");
     })
     .catch((error) => {
       console.error("[wallet-store] Failed to persist wallet store:", error?.message || error);
+      throw error;
     });
 
   return persistQueue;

@@ -311,7 +311,8 @@ router.get("/wallet/:userId", (req, res) => {
   res.json({
     ok: true,
     userId,
-    balance: Number(wallet?.balance || 0)
+    balance: Number(wallet?.balance || 0),
+    wallet: wallet || null
   });
 });
 
