@@ -450,6 +450,49 @@ async function listKnownUsersFromPayments(maxRows = 5000) {
   };
 }
 
+/**
+ * Deletes backend payment/registry rows for one email-like user id.
+ * @param {{userId:string}} payload
+ * @returns {Promise<{deleted:boolean,count:number,reason?:string}>}
+ */
+async function deleteUserPaymentRecords(payload) {
+  if (!supabaseClient) {
+    return {
+      deleted: false,
+      count: 0,
+      reason: "Supabase is not configured."
+    };
+  }
+
+  const userId = normalizeEmailIdentifier(payload?.userId || payload?.email);
+  if (!userId) {
+    return {
+      deleted: false,
+      count: 0,
+      reason: "Missing userId."
+    };
+  }
+
+  const { data, error } = await supabaseClient
+    .from("payments")
+    .delete()
+    .eq("user_id", userId)
+    .select("id");
+
+  if (error) {
+    return {
+      deleted: false,
+      count: 0,
+      reason: error.message || "Unable to delete backend payment records."
+    };
+  }
+
+  return {
+    deleted: true,
+    count: Array.isArray(data) ? data.length : 0
+  };
+}
+
 module.exports = {
   isConfigured,
   verifyPaymentsTableAccess,
@@ -458,5 +501,6 @@ module.exports = {
   setUserPlanState,
   getUserPlanState,
   upsertUserRegistryRecord,
-  listKnownUsersFromPayments
+  listKnownUsersFromPayments,
+  deleteUserPaymentRecords
 };

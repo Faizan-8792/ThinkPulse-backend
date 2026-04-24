@@ -7,11 +7,13 @@ const {
   setUserPlanState,
   getUserPlanState,
   upsertUserRegistryRecord,
-  listKnownUsersFromPayments
+  listKnownUsersFromPayments,
+  deleteUserPaymentRecords
 } = require("../payments/supabase_store");
 const {
   creditWallet,
-  getWalletSnapshot
+  getWalletSnapshot,
+  deleteWalletSnapshot
 } = require("../payments/wallet_store");
 const {
   recordAdminWalletCredit
@@ -258,6 +260,51 @@ router.post("/admin/users/credit-wallet", async (req, res) => {
     res.status(500).json({
       ok: false,
       error: error?.message || "Unable to apply admin wallet credit."
+    });
+  }
+});
+
+router.post("/admin/users/delete", async (req, res) => {
+  const email = normalizeEmail(req.body?.email || req.body?.userId || req.body?.user_id);
+  if (!email) {
+    res.status(400).json({
+      ok: false,
+      error: "Valid email is required."
+    });
+    return;
+  }
+
+  try {
+    const wallet = await deleteWalletSnapshot(email);
+    let payments = {
+      deleted: false,
+      count: 0,
+      reason: "Supabase is not configured."
+    };
+    let planReset = {
+      updated: false,
+      reason: "Supabase is not configured."
+    };
+
+    if (isSupabaseConfigured()) {
+      payments = await deleteUserPaymentRecords({ userId: email });
+      planReset = await setUserPlanState({
+        userId: email,
+        plan: "free"
+      });
+    }
+
+    res.json({
+      ok: true,
+      email,
+      wallet,
+      payments,
+      planReset
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error?.message || "Unable to delete user records."
     });
   }
 });

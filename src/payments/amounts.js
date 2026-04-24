@@ -1,12 +1,12 @@
 "use strict";
 
-const ALLOWED_AMOUNTS_INR = Object.freeze([10, 20]);
+const ALLOWED_AMOUNTS_INR = Object.freeze([50, 100]);
 const MIN_WALLET_TOPUP_INR = 10;
 const MAX_WALLET_TOPUP_INR = 10000;
 
 const PLAN_BY_AMOUNT = Object.freeze({
-  10: "basic",
-  20: "premium"
+  50: "basic",
+  100: "premium"
 });
 
 /**

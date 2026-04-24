@@ -121,7 +121,7 @@ async function createOrder(payload) {
     throw new Error(
       payload?.allowCustomAmount
         ? "Amount must be a whole number between 10 and 10000 INR."
-        : "Amount must be 10 or 20 INR."
+        : "Amount must be 50 or 100 INR."
     );
   }
 
@@ -163,7 +163,7 @@ async function createSingleUseQr(payload) {
     throw new Error(
       allowCustomAmount
         ? "Amount must be a whole number between 10 and 10000 INR."
-        : "Amount must be 10 or 20 INR."
+        : "Amount must be 50 or 100 INR."
     );
   }
 
@@ -211,7 +211,7 @@ async function createPaymentLink(payload) {
     throw new Error(
       allowCustomAmount
         ? "Amount must be a whole number between 10 and 10000 INR."
-        : "Amount must be 10 or 20 INR."
+        : "Amount must be 50 or 100 INR."
     );
   }
 

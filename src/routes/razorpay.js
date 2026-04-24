@@ -365,10 +365,10 @@ router.post("/create-order", async (req, res) => {
 
 router.get("/create-qr", (_req, res) => {
   res.status(405).json({
-    ok: false,
-    error: "Use POST /create-qr with JSON body.",
-    expectedBody: {
-      amount: ALLOWED_AMOUNTS_INR[0],
+      ok: false,
+      error: "Use POST /create-qr with JSON body.",
+      expectedBody: {
+        amount: ALLOWED_AMOUNTS_INR[0],
       userId: "user@example.com"
     }
   });
@@ -413,7 +413,7 @@ router.post("/create-qr", async (req, res) => {
     req.body?.description ||
       (kind === "wallet_topup"
         ? `ThinkPulse wallet top-up Rs ${amountInr}`
-        : `ThinkPulse ${amountInr === 20 ? "Premium" : "Basic"} plan Rs ${amountInr}`),
+        : `ThinkPulse ${amountInr === 100 ? "Premium" : "Basic"} plan Rs ${amountInr}`),
     180
   );
 

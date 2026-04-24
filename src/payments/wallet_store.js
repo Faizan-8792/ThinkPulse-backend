@@ -354,7 +354,51 @@ async function creditWallet(payload) {
   };
 }
 
+/**
+ * Deletes wallet and processed-payment records for one user.
+ * @param {string} userId
+ * @returns {Promise<{deleted:boolean,userId:string,walletRemoved:boolean,processedPaymentsRemoved:number}>}
+ */
+async function deleteWalletSnapshot(userId) {
+  ensureLoaded();
+
+  const safeUserId = normalizeUserId(userId);
+  if (!safeUserId) {
+    return {
+      deleted: false,
+      userId: "",
+      walletRemoved: false,
+      processedPaymentsRemoved: 0
+    };
+  }
+
+  const walletRemoved = Boolean(store.wallets[safeUserId]);
+  if (walletRemoved) {
+    delete store.wallets[safeUserId];
+  }
+
+  let processedPaymentsRemoved = 0;
+  for (const [paymentId, record] of Object.entries(store.processedPayments || {})) {
+    if (normalizeUserId(record?.userId) !== safeUserId) {
+      continue;
+    }
+    delete store.processedPayments[paymentId];
+    processedPaymentsRemoved += 1;
+  }
+
+  store.updatedAt = Date.now();
+  await persistStore();
+
+  return {
+    deleted: walletRemoved || processedPaymentsRemoved > 0,
+    userId: safeUserId,
+    walletRemoved,
+    processedPaymentsRemoved
+  };
+}
+
 module.exports = {
   creditWallet,
-  getWalletSnapshot
+  getWalletSnapshot,
+  deleteWalletSnapshot
 };
