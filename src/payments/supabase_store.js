@@ -103,6 +103,158 @@ function toIsoTimestamp(value) {
   return new Date().toISOString();
 }
 
+const GLOBAL_JSON_CONFIG_ATTEMPTS = [
+  {
+    table: "app_settings",
+    keyColumn: "setting_key",
+    valueColumn: "setting_value",
+    updatedAtColumn: "updated_at"
+  },
+  {
+    table: "app_settings",
+    keyColumn: "key",
+    valueColumn: "value",
+    updatedAtColumn: "updated_at"
+  },
+  {
+    table: "settings",
+    keyColumn: "setting_key",
+    valueColumn: "setting_value",
+    updatedAtColumn: "updated_at"
+  },
+  {
+    table: "settings",
+    keyColumn: "key",
+    valueColumn: "value",
+    updatedAtColumn: "updated_at"
+  }
+];
+
+function parseJsonLikeValue(value) {
+  if (value && typeof value === "object") {
+    return value;
+  }
+
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(raw);
+  } catch (_error) {
+    return null;
+  }
+}
+
+async function getGlobalJsonConfig(settingKey) {
+  if (!supabaseClient) {
+    return {
+      found: false,
+      reason: "Supabase is not configured."
+    };
+  }
+
+  const safeKey = String(settingKey || "").trim().slice(0, 120);
+  if (!safeKey) {
+    return {
+      found: false,
+      reason: "Missing settingKey."
+    };
+  }
+
+  for (const attempt of GLOBAL_JSON_CONFIG_ATTEMPTS) {
+    const selectColumns = `${attempt.keyColumn},${attempt.valueColumn}`;
+    const { data: rows, error } = await supabaseClient
+      .from(attempt.table)
+      .select(selectColumns)
+      .eq(attempt.keyColumn, safeKey)
+      .limit(1);
+
+    if (error) {
+      if (isSchemaError(error)) {
+        continue;
+      }
+      return {
+        found: false,
+        reason: error.message || "Unable to read global JSON config."
+      };
+    }
+
+    const row = Array.isArray(rows) && rows.length ? rows[0] : null;
+    if (!row) {
+      continue;
+    }
+
+    return {
+      found: true,
+      table: attempt.table,
+      keyColumn: attempt.keyColumn,
+      valueColumn: attempt.valueColumn,
+      value: parseJsonLikeValue(row?.[attempt.valueColumn]) || {}
+    };
+  }
+
+  return {
+    found: false,
+    reason: "No config row found. Run backend/sql/app_settings.sql before saving premium API settings."
+  };
+}
+
+async function upsertGlobalJsonConfig(settingKey, value) {
+  if (!supabaseClient) {
+    return {
+      stored: false,
+      reason: "Supabase is not configured."
+    };
+  }
+
+  const safeKey = String(settingKey || "").trim().slice(0, 120);
+  if (!safeKey) {
+    throw new Error("settingKey is required.");
+  }
+
+  const safeValue = value && typeof value === "object" ? value : {};
+  for (const attempt of GLOBAL_JSON_CONFIG_ATTEMPTS) {
+    const rowPayload = {
+      [attempt.keyColumn]: safeKey,
+      [attempt.valueColumn]: safeValue
+    };
+    if (attempt.updatedAtColumn) {
+      rowPayload[attempt.updatedAtColumn] = new Date().toISOString();
+    }
+
+    const { data: rows, error } = await supabaseClient
+      .from(attempt.table)
+      .upsert(rowPayload, {
+        onConflict: attempt.keyColumn
+      })
+      .select(`${attempt.keyColumn},${attempt.valueColumn}`)
+      .limit(1);
+
+    if (error) {
+      if (isSchemaError(error)) {
+        continue;
+      }
+      throw new Error(error.message || "Unable to upsert global JSON config.");
+    }
+
+    const row = Array.isArray(rows) ? rows[0] : null;
+    return {
+      stored: true,
+      table: attempt.table,
+      keyColumn: attempt.keyColumn,
+      valueColumn: attempt.valueColumn,
+      value: parseJsonLikeValue(row?.[attempt.valueColumn]) || safeValue
+    };
+  }
+
+  return {
+    stored: false,
+    reason: "No supported config table found. Run backend/sql/app_settings.sql before saving premium API settings."
+  };
+}
+
 /**
  * Confirms payments table is reachable.
  * @returns {Promise<{ok:boolean,error?:string}>}
@@ -502,5 +654,7 @@ module.exports = {
   getUserPlanState,
   upsertUserRegistryRecord,
   listKnownUsersFromPayments,
-  deleteUserPaymentRecords
+  deleteUserPaymentRecords,
+  getGlobalJsonConfig,
+  upsertGlobalJsonConfig
 };

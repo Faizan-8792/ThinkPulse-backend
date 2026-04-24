@@ -8,7 +8,9 @@ const {
   getUserPlanState,
   upsertUserRegistryRecord,
   listKnownUsersFromPayments,
-  deleteUserPaymentRecords
+  deleteUserPaymentRecords,
+  getGlobalJsonConfig,
+  upsertGlobalJsonConfig
 } = require("../payments/supabase_store");
 const {
   creditWallet,
@@ -20,6 +22,7 @@ const {
 } = require("../rewards/rewards_store");
 
 const router = express.Router();
+const PREMIUM_SERVICE_APIS_SETTING_KEY = "premium_service_apis_v1";
 
 /**
  * Converts unknown value to normalized email-like identifier.
@@ -59,6 +62,90 @@ function normalizeInrAmount(value) {
   }
   return Math.round(numeric * 100) / 100;
 }
+
+router.get("/config/premium-service-apis", async (_req, res) => {
+  if (!isSupabaseConfigured()) {
+    res.status(503).json({
+      ok: false,
+      error: "Supabase is not configured on the server."
+    });
+    return;
+  }
+
+  try {
+    const stored = await getGlobalJsonConfig(PREMIUM_SERVICE_APIS_SETTING_KEY);
+    res.json({
+      ok: true,
+      premiumApis: stored?.found ? stored.value || {} : {},
+      source: stored?.table || "",
+      found: Boolean(stored?.found)
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error?.message || "Unable to load premium API settings."
+    });
+  }
+});
+
+router.get("/admin/config/premium-service-apis", async (_req, res) => {
+  if (!isSupabaseConfigured()) {
+    res.status(503).json({
+      ok: false,
+      error: "Supabase is not configured on the server."
+    });
+    return;
+  }
+
+  try {
+    const stored = await getGlobalJsonConfig(PREMIUM_SERVICE_APIS_SETTING_KEY);
+    res.json({
+      ok: true,
+      premiumApis: stored?.found ? stored.value || {} : {},
+      source: stored?.table || "",
+      found: Boolean(stored?.found)
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error?.message || "Unable to load premium API settings."
+    });
+  }
+});
+
+router.post("/admin/config/premium-service-apis", async (req, res) => {
+  if (!isSupabaseConfigured()) {
+    res.status(503).json({
+      ok: false,
+      error: "Supabase is not configured on the server."
+    });
+    return;
+  }
+
+  try {
+    const payload =
+      req.body?.premiumApis && typeof req.body.premiumApis === "object"
+        ? req.body.premiumApis
+        : req.body?.config && typeof req.body.config === "object"
+          ? req.body.config
+          : {};
+    const stored = await upsertGlobalJsonConfig(PREMIUM_SERVICE_APIS_SETTING_KEY, payload);
+    if (!stored?.stored) {
+      throw new Error(stored?.reason || "Premium API settings table is not ready.");
+    }
+
+    res.json({
+      ok: true,
+      premiumApis: stored.value || {},
+      source: stored.table || ""
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error?.message || "Unable to save premium API settings."
+    });
+  }
+});
 
 router.post("/users/upsert", async (req, res) => {
   if (!isSupabaseConfigured()) {

@@ -119,8 +119,8 @@ const envBootstrapConfig = {
     gemini: parseEnvList("ADMIN_GEMINI_KEYS", 30),
     deepseek: {
       key: readEnv("ADMIN_DEEPSEEK_KEY", ""),
-      endpoint: readEnv("ADMIN_DEEPSEEK_ENDPOINT", "https://integrate.api.nvidia.com/v1/chat/completions"),
-      model: readEnv("ADMIN_DEEPSEEK_MODEL", "deepseek-ai/deepseek-v3.2")
+      endpoint: readEnv("ADMIN_DEEPSEEK_ENDPOINT", "https://api.deepseek.com/chat/completions"),
+      model: readEnv("ADMIN_DEEPSEEK_MODEL", "deepseek-v4-flash")
     },
     qwen: {
       key: readEnv("ADMIN_QWEN_KEY", ""),
