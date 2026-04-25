@@ -130,6 +130,11 @@ const GLOBAL_JSON_CONFIG_ATTEMPTS = [
   }
 ];
 
+const USER_STATE_NAMESPACE_ALLOWLIST = new Set([
+  "billing",
+  "account"
+]);
+
 function parseJsonLikeValue(value) {
   if (value && typeof value === "object") {
     return value;
@@ -252,6 +257,198 @@ async function upsertGlobalJsonConfig(settingKey, value) {
   return {
     stored: false,
     reason: "No supported config table found. Run backend/sql/app_settings.sql before saving premium API settings."
+  };
+}
+
+async function deleteGlobalJsonConfig(settingKey) {
+  if (!supabaseClient) {
+    return {
+      deleted: false,
+      reason: "Supabase is not configured."
+    };
+  }
+
+  const safeKey = String(settingKey || "").trim().slice(0, 120);
+  if (!safeKey) {
+    return {
+      deleted: false,
+      reason: "Missing settingKey."
+    };
+  }
+
+  for (const attempt of GLOBAL_JSON_CONFIG_ATTEMPTS) {
+    const { data: rows, error } = await supabaseClient
+      .from(attempt.table)
+      .delete()
+      .eq(attempt.keyColumn, safeKey)
+      .select(attempt.keyColumn);
+
+    if (error) {
+      if (isSchemaError(error)) {
+        continue;
+      }
+      throw new Error(error.message || "Unable to delete global JSON config.");
+    }
+
+    return {
+      deleted: true,
+      table: attempt.table,
+      keyColumn: attempt.keyColumn,
+      count: Array.isArray(rows) ? rows.length : 0
+    };
+  }
+
+  return {
+    deleted: false,
+    reason: "No supported config table found. Run backend/sql/app_settings.sql before deleting config."
+  };
+}
+
+function normalizeUserStateNamespace(value) {
+  const safe = String(value || "").trim().toLowerCase().slice(0, 40);
+  return USER_STATE_NAMESPACE_ALLOWLIST.has(safe) ? safe : "";
+}
+
+function buildUserStateKey(namespace, email) {
+  const safeNamespace = normalizeUserStateNamespace(namespace);
+  const safeEmail = normalizeEmailIdentifier(email);
+  if (!safeNamespace || !safeEmail) {
+    return "";
+  }
+  return `user_state:${safeNamespace}:${safeEmail}`;
+}
+
+function extractUserStateEmail(namespace, key) {
+  const safeNamespace = normalizeUserStateNamespace(namespace);
+  const safeKey = String(key || "").trim();
+  const prefix = `user_state:${safeNamespace}:`;
+  if (!safeNamespace || !safeKey.startsWith(prefix)) {
+    return "";
+  }
+  return normalizeEmailIdentifier(safeKey.slice(prefix.length));
+}
+
+async function getUserStateConfig(namespace, email) {
+  const key = buildUserStateKey(namespace, email);
+  if (!key) {
+    return {
+      found: false,
+      reason: "Valid namespace/email is required."
+    };
+  }
+
+  const stored = await getGlobalJsonConfig(key);
+  return {
+    ...stored,
+    namespace: normalizeUserStateNamespace(namespace),
+    email: normalizeEmailIdentifier(email),
+    value: stored?.found ? stored.value || {} : null
+  };
+}
+
+async function upsertUserStateConfig(namespace, email, value) {
+  const key = buildUserStateKey(namespace, email);
+  if (!key) {
+    throw new Error("Valid namespace/email is required for user-state upsert.");
+  }
+
+  const stored = await upsertGlobalJsonConfig(
+    key,
+    value && typeof value === "object" ? value : {}
+  );
+
+  return {
+    ...stored,
+    namespace: normalizeUserStateNamespace(namespace),
+    email: normalizeEmailIdentifier(email)
+  };
+}
+
+async function deleteUserStateConfig(namespace, email) {
+  const key = buildUserStateKey(namespace, email);
+  if (!key) {
+    return {
+      deleted: false,
+      reason: "Valid namespace/email is required."
+    };
+  }
+
+  const deleted = await deleteGlobalJsonConfig(key);
+  return {
+    ...deleted,
+    namespace: normalizeUserStateNamespace(namespace),
+    email: normalizeEmailIdentifier(email)
+  };
+}
+
+async function listUserStateConfigs(namespace, maxRows = 5000) {
+  if (!supabaseClient) {
+    return {
+      ok: false,
+      items: [],
+      reason: "Supabase is not configured."
+    };
+  }
+
+  const safeNamespace = normalizeUserStateNamespace(namespace);
+  if (!safeNamespace) {
+    return {
+      ok: false,
+      items: [],
+      reason: "Unsupported namespace."
+    };
+  }
+
+  const safeLimit = Number.isFinite(Number(maxRows))
+    ? Math.max(1, Math.min(10000, Math.round(Number(maxRows))))
+    : 5000;
+  const prefix = `user_state:${safeNamespace}:`;
+
+  for (const attempt of GLOBAL_JSON_CONFIG_ATTEMPTS) {
+    const selectColumns = `${attempt.keyColumn},${attempt.valueColumn}${attempt.updatedAtColumn ? `,${attempt.updatedAtColumn}` : ""}`;
+    let query = supabaseClient
+      .from(attempt.table)
+      .select(selectColumns)
+      .like(attempt.keyColumn, `${prefix}%`)
+      .limit(safeLimit);
+
+    if (attempt.updatedAtColumn) {
+      query = query.order(attempt.updatedAtColumn, { ascending: false });
+    }
+
+    const { data: rows, error } = await query;
+    if (error) {
+      if (isSchemaError(error)) {
+        continue;
+      }
+      throw new Error(error.message || "Unable to list user-state configs.");
+    }
+
+    const items = [];
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const email = extractUserStateEmail(safeNamespace, row?.[attempt.keyColumn]);
+      if (!email) {
+        continue;
+      }
+      items.push({
+        email,
+        namespace: safeNamespace,
+        value: parseJsonLikeValue(row?.[attempt.valueColumn]) || {},
+        updatedAt: row?.[attempt.updatedAtColumn] || ""
+      });
+    }
+
+    return {
+      ok: true,
+      namespace: safeNamespace,
+      items
+    };
+  }
+
+  return {
+    ok: false,
+    items: [],
+    reason: "No supported config table found. Run backend/sql/app_settings.sql before listing user-state configs."
   };
 }
 
@@ -656,5 +853,10 @@ module.exports = {
   listKnownUsersFromPayments,
   deleteUserPaymentRecords,
   getGlobalJsonConfig,
-  upsertGlobalJsonConfig
+  upsertGlobalJsonConfig,
+  deleteGlobalJsonConfig,
+  getUserStateConfig,
+  upsertUserStateConfig,
+  deleteUserStateConfig,
+  listUserStateConfigs
 };

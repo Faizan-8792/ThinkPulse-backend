@@ -297,7 +297,7 @@ async function persistPaymentAndPlan(payload) {
   };
 }
 
-router.get("/wallet/:userId", (req, res) => {
+router.get("/wallet/:userId", async (req, res) => {
   const userId = toSafeString(req.params?.userId, 180).toLowerCase();
   if (!userId) {
     res.status(400).json({
@@ -307,13 +307,20 @@ router.get("/wallet/:userId", (req, res) => {
     return;
   }
 
-  const wallet = getWalletSnapshot(userId);
-  res.json({
-    ok: true,
-    userId,
-    balance: Number(wallet?.balance || 0),
-    wallet: wallet || null
-  });
+  try {
+    const wallet = await getWalletSnapshot(userId);
+    res.json({
+      ok: true,
+      userId,
+      balance: Number(wallet?.balance || 0),
+      wallet: wallet || null
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error?.message || "Unable to load wallet."
+    });
+  }
 });
 
 router.post("/create-order", async (req, res) => {

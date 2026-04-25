@@ -3,9 +3,15 @@
 const fs = require("fs");
 const path = require("path");
 const { resolveStorePath } = require("../storage/store_path");
+const {
+  isConfigured: isSupabaseConfigured,
+  getGlobalJsonConfig,
+  upsertGlobalJsonConfig
+} = require("./supabase_store");
 
 const MAX_PROCESSED_PAYMENTS = 20000;
 const walletStorePath = resolveStorePath(process.env.WALLET_STORE_PATH, "wallets.json");
+const WALLET_STORE_CONFIG_KEY = "wallet_store_v1";
 
 let store = {
   wallets: {},
@@ -14,6 +20,7 @@ let store = {
 };
 
 let initialized = false;
+let loadPromise = null;
 let persistQueue = Promise.resolve();
 
 /**
@@ -186,45 +193,86 @@ function normalizeStore(raw) {
 }
 
 /**
- * Loads wallet state from disk once per process boot.
+ * Loads wallet state from Supabase/file once per process boot.
  */
-function ensureLoaded() {
+async function ensureLoaded() {
   if (initialized) {
     return;
   }
 
-  initialized = true;
-  try {
-    if (!fs.existsSync(walletStorePath)) {
-      return;
-    }
-
-    const content = fs.readFileSync(walletStorePath, "utf8");
-    if (!content.trim()) {
-      return;
-    }
-
-    const parsed = JSON.parse(content);
-    store = normalizeStore(parsed);
-  } catch (error) {
-    console.warn("[wallet-store] Failed to load wallet store:", error?.message || error);
-    store = {
-      wallets: {},
-      processedPayments: {},
-      updatedAt: Date.now()
-    };
+  if (loadPromise) {
+    await loadPromise;
+    return;
   }
+
+  loadPromise = (async () => {
+    try {
+      if (isSupabaseConfigured()) {
+        try {
+          const remote = await getGlobalJsonConfig(WALLET_STORE_CONFIG_KEY);
+          if (remote?.found && remote.value && typeof remote.value === "object") {
+            store = normalizeStore(remote.value);
+            initialized = true;
+            return;
+          }
+        } catch (error) {
+          console.warn("[wallet-store] Supabase load failed, falling back to file:", error?.message || error);
+        }
+      }
+
+      if (!fs.existsSync(walletStorePath)) {
+        initialized = true;
+        return;
+      }
+
+      const content = fs.readFileSync(walletStorePath, "utf8");
+      if (!content.trim()) {
+        initialized = true;
+        return;
+      }
+
+      const parsed = JSON.parse(content);
+      store = normalizeStore(parsed);
+      initialized = true;
+    } catch (error) {
+      console.warn("[wallet-store] Failed to load wallet store:", error?.message || error);
+      store = {
+        wallets: {},
+        processedPayments: {},
+        updatedAt: Date.now()
+      };
+      initialized = true;
+    }
+  })().finally(() => {
+    loadPromise = null;
+  });
+
+  await loadPromise;
 }
 
 /**
- * Persists current in-memory state to disk.
+ * Persists current in-memory state to Supabase when available, else file.
  * @returns {Promise<void>}
  */
 function persistStore() {
-  const snapshot = JSON.stringify(store, null, 2);
+  store.updatedAt = Date.now();
+  const snapshotPayload = normalizeStore(store);
+  store = snapshotPayload;
+  const snapshot = JSON.stringify(snapshotPayload, null, 2);
   persistQueue = persistQueue
     .catch(() => undefined)
     .then(async () => {
+      if (isSupabaseConfigured()) {
+        try {
+          const stored = await upsertGlobalJsonConfig(WALLET_STORE_CONFIG_KEY, snapshotPayload);
+          if (stored?.stored) {
+            return;
+          }
+        } catch (error) {
+          console.warn("[wallet-store] Supabase persist failed, falling back to file:", error?.message || error);
+        }
+      }
+
       await fs.promises.mkdir(path.dirname(walletStorePath), { recursive: true });
       await fs.promises.writeFile(walletStorePath, snapshot, "utf8");
     })
@@ -239,10 +287,10 @@ function persistStore() {
 /**
  * Returns wallet snapshot for one user.
  * @param {string} userId
- * @returns {{userId:string,balance:number,updatedAt:number,creditsCount:number,lastCreditAmount:number,lastPaymentId:string,lastSource:string}|null}
+ * @returns {Promise<{userId:string,balance:number,updatedAt:number,creditsCount:number,lastCreditAmount:number,lastPaymentId:string,lastSource:string}|null>}
  */
-function getWalletSnapshot(userId) {
-  ensureLoaded();
+async function getWalletSnapshot(userId) {
+  await ensureLoaded();
 
   const safeUserId = normalizeUserId(userId);
   if (!safeUserId) {
@@ -278,7 +326,7 @@ function getWalletSnapshot(userId) {
  * @returns {Promise<{applied:boolean,reason:string,paymentId?:string,creditedAmountInr?:number,wallet:any}>}
  */
 async function creditWallet(payload) {
-  ensureLoaded();
+  await ensureLoaded();
 
   const userId = normalizeUserId(payload?.userId);
   const amountInr = normalizeAmountInr(payload?.amountInr);
@@ -298,7 +346,7 @@ async function creditWallet(payload) {
     return {
       applied: false,
       reason: "invalid_amount",
-      wallet: getWalletSnapshot(userId)
+      wallet: await getWalletSnapshot(userId)
     };
   }
 
@@ -306,7 +354,7 @@ async function creditWallet(payload) {
     return {
       applied: false,
       reason: "missing_payment_id",
-      wallet: getWalletSnapshot(userId)
+      wallet: await getWalletSnapshot(userId)
     };
   }
 
@@ -315,7 +363,7 @@ async function creditWallet(payload) {
       applied: false,
       reason: "duplicate_payment",
       paymentId,
-      wallet: getWalletSnapshot(userId)
+      wallet: await getWalletSnapshot(userId)
     };
   }
 
@@ -350,7 +398,7 @@ async function creditWallet(payload) {
     reason: "credited",
     paymentId,
     creditedAmountInr: amountInr,
-    wallet: getWalletSnapshot(userId)
+    wallet: await getWalletSnapshot(userId)
   };
 }
 
@@ -360,7 +408,7 @@ async function creditWallet(payload) {
  * @returns {Promise<{deleted:boolean,userId:string,walletRemoved:boolean,processedPaymentsRemoved:number}>}
  */
 async function deleteWalletSnapshot(userId) {
-  ensureLoaded();
+  await ensureLoaded();
 
   const safeUserId = normalizeUserId(userId);
   if (!safeUserId) {

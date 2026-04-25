@@ -10,7 +10,11 @@ const {
   listKnownUsersFromPayments,
   deleteUserPaymentRecords,
   getGlobalJsonConfig,
-  upsertGlobalJsonConfig
+  upsertGlobalJsonConfig,
+  getUserStateConfig,
+  upsertUserStateConfig,
+  deleteUserStateConfig,
+  listUserStateConfigs
 } = require("../payments/supabase_store");
 const {
   creditWallet,
@@ -23,6 +27,10 @@ const {
 
 const router = express.Router();
 const PREMIUM_SERVICE_APIS_SETTING_KEY = "premium_service_apis_v1";
+const USER_STATE_NAMESPACES = new Set([
+  "billing",
+  "account"
+]);
 
 /**
  * Converts unknown value to normalized email-like identifier.
@@ -48,6 +56,11 @@ function normalizePlan(value) {
     return safe;
   }
   return "";
+}
+
+function normalizeStateNamespace(value) {
+  const safe = String(value || "").trim().toLowerCase();
+  return USER_STATE_NAMESPACES.has(safe) ? safe : "";
 }
 
 /**
@@ -143,6 +156,180 @@ router.post("/admin/config/premium-service-apis", async (req, res) => {
     res.status(500).json({
       ok: false,
       error: error?.message || "Unable to save premium API settings."
+    });
+  }
+});
+
+router.get("/users/state/:namespace/:email", async (req, res) => {
+  if (!isSupabaseConfigured()) {
+    res.status(503).json({
+      ok: false,
+      error: "Supabase is not configured on the server."
+    });
+    return;
+  }
+
+  const namespace = normalizeStateNamespace(req.params?.namespace);
+  const email = normalizeEmail(req.params?.email);
+  if (!namespace) {
+    res.status(400).json({
+      ok: false,
+      error: "Valid namespace is required."
+    });
+    return;
+  }
+  if (!email) {
+    res.status(400).json({
+      ok: false,
+      error: "Valid email is required."
+    });
+    return;
+  }
+
+  try {
+    const stored = await getUserStateConfig(namespace, email);
+    res.json({
+      ok: true,
+      namespace,
+      email,
+      found: Boolean(stored?.found),
+      value: stored?.found ? stored.value || {} : null,
+      source: stored?.table || ""
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error?.message || "Unable to load user state."
+    });
+  }
+});
+
+router.post("/users/state/:namespace/:email", async (req, res) => {
+  if (!isSupabaseConfigured()) {
+    res.status(503).json({
+      ok: false,
+      error: "Supabase is not configured on the server."
+    });
+    return;
+  }
+
+  const namespace = normalizeStateNamespace(req.params?.namespace);
+  const email = normalizeEmail(req.params?.email);
+  if (!namespace) {
+    res.status(400).json({
+      ok: false,
+      error: "Valid namespace is required."
+    });
+    return;
+  }
+  if (!email) {
+    res.status(400).json({
+      ok: false,
+      error: "Valid email is required."
+    });
+    return;
+  }
+
+  try {
+    const stored = await upsertUserStateConfig(
+      namespace,
+      email,
+      req.body?.value && typeof req.body.value === "object"
+        ? req.body.value
+        : req.body && typeof req.body === "object"
+          ? req.body
+          : {}
+    );
+
+    res.json({
+      ok: true,
+      namespace,
+      email,
+      value: stored?.value || {},
+      source: stored?.table || ""
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error?.message || "Unable to save user state."
+    });
+  }
+});
+
+router.delete("/users/state/:namespace/:email", async (req, res) => {
+  if (!isSupabaseConfigured()) {
+    res.status(503).json({
+      ok: false,
+      error: "Supabase is not configured on the server."
+    });
+    return;
+  }
+
+  const namespace = normalizeStateNamespace(req.params?.namespace);
+  const email = normalizeEmail(req.params?.email);
+  if (!namespace) {
+    res.status(400).json({
+      ok: false,
+      error: "Valid namespace is required."
+    });
+    return;
+  }
+  if (!email) {
+    res.status(400).json({
+      ok: false,
+      error: "Valid email is required."
+    });
+    return;
+  }
+
+  try {
+    const deleted = await deleteUserStateConfig(namespace, email);
+    res.json({
+      ok: true,
+      namespace,
+      email,
+      deleted: Boolean(deleted?.deleted),
+      count: Number(deleted?.count || 0),
+      source: deleted?.table || ""
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error?.message || "Unable to delete user state."
+    });
+  }
+});
+
+router.get("/admin/users/state/:namespace", async (req, res) => {
+  if (!isSupabaseConfigured()) {
+    res.status(503).json({
+      ok: false,
+      error: "Supabase is not configured on the server."
+    });
+    return;
+  }
+
+  const namespace = normalizeStateNamespace(req.params?.namespace);
+  if (!namespace) {
+    res.status(400).json({
+      ok: false,
+      error: "Valid namespace is required."
+    });
+    return;
+  }
+
+  try {
+    const listed = await listUserStateConfigs(namespace, Number(req.query?.limit) || 5000);
+    res.json({
+      ok: true,
+      namespace,
+      items: Array.isArray(listed?.items) ? listed.items : [],
+      count: Array.isArray(listed?.items) ? listed.items.length : 0
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error?.message || "Unable to list user states."
     });
   }
 });
@@ -341,7 +528,7 @@ router.post("/admin/users/credit-wallet", async (req, res) => {
       email,
       amountInr,
       credit,
-      wallet: getWalletSnapshot(email)
+      wallet: await getWalletSnapshot(email)
     });
   } catch (error) {
     res.status(500).json({
