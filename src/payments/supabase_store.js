@@ -130,6 +130,10 @@ const GLOBAL_JSON_CONFIG_ATTEMPTS = [
   }
 ];
 
+const GLOBAL_JSON_CONFIG_KEY_MAX_LENGTH = 240;
+const PAYMENT_CONFIG_ROW_PREFIX = "global_config:";
+const PAYMENT_CONFIG_USER_ID = "__global_config__";
+
 const USER_STATE_NAMESPACE_ALLOWLIST = new Set([
   "billing",
   "account"
@@ -152,6 +156,210 @@ function parseJsonLikeValue(value) {
   }
 }
 
+function normalizeGlobalJsonConfigKey(value) {
+  return String(value || "").trim().slice(0, GLOBAL_JSON_CONFIG_KEY_MAX_LENGTH);
+}
+
+function buildPaymentConfigRowId(settingKey) {
+  const safeKey = normalizeGlobalJsonConfigKey(settingKey);
+  if (!safeKey) {
+    return "";
+  }
+  return `${PAYMENT_CONFIG_ROW_PREFIX}${safeKey}`;
+}
+
+function extractPaymentConfigKey(paymentId) {
+  const safePaymentId = String(paymentId || "").trim();
+  if (!safePaymentId.startsWith(PAYMENT_CONFIG_ROW_PREFIX)) {
+    return "";
+  }
+  return normalizeGlobalJsonConfigKey(safePaymentId.slice(PAYMENT_CONFIG_ROW_PREFIX.length));
+}
+
+async function getGlobalJsonConfigFromPayments(settingKey) {
+  if (!supabaseClient) {
+    return {
+      found: false,
+      reason: "Supabase is not configured."
+    };
+  }
+
+  const paymentId = buildPaymentConfigRowId(settingKey);
+  if (!paymentId) {
+    return {
+      found: false,
+      reason: "Missing settingKey."
+    };
+  }
+
+  const { data: rows, error } = await supabaseClient
+    .from("payments")
+    .select("payment_id,status,created_at")
+    .eq("payment_id", paymentId)
+    .limit(1);
+
+  if (error) {
+    return {
+      found: false,
+      reason: error.message || "Unable to read payments-backed global JSON config."
+    };
+  }
+
+  const row = Array.isArray(rows) && rows.length ? rows[0] : null;
+  if (!row) {
+    return {
+      found: false,
+      reason: "No payments-backed config row found."
+    };
+  }
+
+  return {
+    found: true,
+    table: "payments",
+    keyColumn: "payment_id",
+    valueColumn: "status",
+    value: parseJsonLikeValue(row?.status) || {}
+  };
+}
+
+async function upsertGlobalJsonConfigIntoPayments(settingKey, value) {
+  if (!supabaseClient) {
+    return {
+      stored: false,
+      reason: "Supabase is not configured."
+    };
+  }
+
+  const paymentId = buildPaymentConfigRowId(settingKey);
+  if (!paymentId) {
+    throw new Error("settingKey is required.");
+  }
+
+  const safeValue = value && typeof value === "object" ? value : {};
+  const rowPayload = {
+    user_id: PAYMENT_CONFIG_USER_ID,
+    amount: 0,
+    status: JSON.stringify(safeValue),
+    payment_id: paymentId,
+    created_at: new Date().toISOString()
+  };
+
+  const { data: rows, error } = await supabaseClient
+    .from("payments")
+    .upsert(rowPayload, {
+      onConflict: "payment_id"
+    })
+    .select("payment_id,status,created_at")
+    .limit(1);
+
+  if (error) {
+    throw new Error(error.message || "Unable to upsert payments-backed global JSON config.");
+  }
+
+  const row = Array.isArray(rows) ? rows[0] : null;
+  return {
+    stored: true,
+    table: "payments",
+    keyColumn: "payment_id",
+    valueColumn: "status",
+    value: parseJsonLikeValue(row?.status) || safeValue
+  };
+}
+
+async function deleteGlobalJsonConfigFromPayments(settingKey) {
+  if (!supabaseClient) {
+    return {
+      deleted: false,
+      reason: "Supabase is not configured."
+    };
+  }
+
+  const paymentId = buildPaymentConfigRowId(settingKey);
+  if (!paymentId) {
+    return {
+      deleted: false,
+      reason: "Missing settingKey."
+    };
+  }
+
+  const { data: rows, error } = await supabaseClient
+    .from("payments")
+    .delete()
+    .eq("payment_id", paymentId)
+    .select("id");
+
+  if (error) {
+    throw new Error(error.message || "Unable to delete payments-backed global JSON config.");
+  }
+
+  return {
+    deleted: true,
+    table: "payments",
+    keyColumn: "payment_id",
+    count: Array.isArray(rows) ? rows.length : 0
+  };
+}
+
+async function listUserStateConfigsFromPayments(namespace, maxRows = 5000) {
+  if (!supabaseClient) {
+    return {
+      ok: false,
+      items: [],
+      reason: "Supabase is not configured."
+    };
+  }
+
+  const safeNamespace = normalizeUserStateNamespace(namespace);
+  if (!safeNamespace) {
+    return {
+      ok: false,
+      items: [],
+      reason: "Unsupported namespace."
+    };
+  }
+
+  const safeLimit = Number.isFinite(Number(maxRows))
+    ? Math.max(1, Math.min(10000, Math.round(Number(maxRows))))
+    : 5000;
+  const prefix = `${PAYMENT_CONFIG_ROW_PREFIX}user_state:${safeNamespace}:`;
+
+  const { data: rows, error } = await supabaseClient
+    .from("payments")
+    .select("payment_id,status,created_at")
+    .like("payment_id", `${prefix}%`)
+    .order("created_at", { ascending: false })
+    .limit(safeLimit);
+
+  if (error) {
+    return {
+      ok: false,
+      items: [],
+      reason: error.message || "Unable to list payments-backed user-state configs."
+    };
+  }
+
+  const items = [];
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const key = extractPaymentConfigKey(row?.payment_id);
+    const email = extractUserStateEmail(safeNamespace, key);
+    if (!email) {
+      continue;
+    }
+    items.push({
+      email,
+      namespace: safeNamespace,
+      value: parseJsonLikeValue(row?.status) || {},
+      updatedAt: row?.created_at || ""
+    });
+  }
+
+  return {
+    ok: true,
+    namespace: safeNamespace,
+    items
+  };
+}
+
 async function getGlobalJsonConfig(settingKey) {
   if (!supabaseClient) {
     return {
@@ -160,7 +368,7 @@ async function getGlobalJsonConfig(settingKey) {
     };
   }
 
-  const safeKey = String(settingKey || "").trim().slice(0, 120);
+  const safeKey = normalizeGlobalJsonConfigKey(settingKey);
   if (!safeKey) {
     return {
       found: false,
@@ -200,9 +408,16 @@ async function getGlobalJsonConfig(settingKey) {
     };
   }
 
+  const paymentsFallback = await getGlobalJsonConfigFromPayments(safeKey);
+  if (paymentsFallback?.found) {
+    return paymentsFallback;
+  }
+
   return {
     found: false,
-    reason: "No config row found. Run backend/sql/app_settings.sql before saving premium API settings."
+    reason:
+      paymentsFallback?.reason ||
+      "No config row found. Run backend/sql/app_settings.sql before saving premium API settings."
   };
 }
 
@@ -214,7 +429,7 @@ async function upsertGlobalJsonConfig(settingKey, value) {
     };
   }
 
-  const safeKey = String(settingKey || "").trim().slice(0, 120);
+  const safeKey = normalizeGlobalJsonConfigKey(settingKey);
   if (!safeKey) {
     throw new Error("settingKey is required.");
   }
@@ -254,10 +469,7 @@ async function upsertGlobalJsonConfig(settingKey, value) {
     };
   }
 
-  return {
-    stored: false,
-    reason: "No supported config table found. Run backend/sql/app_settings.sql before saving premium API settings."
-  };
+  return upsertGlobalJsonConfigIntoPayments(safeKey, safeValue);
 }
 
 async function deleteGlobalJsonConfig(settingKey) {
@@ -268,7 +480,7 @@ async function deleteGlobalJsonConfig(settingKey) {
     };
   }
 
-  const safeKey = String(settingKey || "").trim().slice(0, 120);
+  const safeKey = normalizeGlobalJsonConfigKey(settingKey);
   if (!safeKey) {
     return {
       deleted: false,
@@ -298,10 +510,7 @@ async function deleteGlobalJsonConfig(settingKey) {
     };
   }
 
-  return {
-    deleted: false,
-    reason: "No supported config table found. Run backend/sql/app_settings.sql before deleting config."
-  };
+  return deleteGlobalJsonConfigFromPayments(safeKey);
 }
 
 function normalizeUserStateNamespace(value) {
@@ -445,11 +654,7 @@ async function listUserStateConfigs(namespace, maxRows = 5000) {
     };
   }
 
-  return {
-    ok: false,
-    items: [],
-    reason: "No supported config table found. Run backend/sql/app_settings.sql before listing user-state configs."
-  };
+  return listUserStateConfigsFromPayments(safeNamespace, safeLimit);
 }
 
 /**
