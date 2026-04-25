@@ -120,7 +120,7 @@ const envBootstrapConfig = {
     deepseek: {
       key: readEnv("ADMIN_DEEPSEEK_KEY", ""),
       endpoint: readEnv("ADMIN_DEEPSEEK_ENDPOINT", "https://api.deepseek.com/chat/completions"),
-      model: readEnv("ADMIN_DEEPSEEK_MODEL", "deepseek-v4-flash")
+      model: readEnv("ADMIN_DEEPSEEK_MODEL", "deepseek-chat")
     },
     qwen: {
       key: readEnv("ADMIN_QWEN_KEY", ""),
