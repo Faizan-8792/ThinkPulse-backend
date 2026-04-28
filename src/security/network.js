@@ -124,7 +124,7 @@ async function assertPublicHttpsEndpoint(value) {
     throw new Error("Endpoint cannot resolve to private or loopback IP ranges.");
   }
 
-  return parsed.toString();
+  return raw;
 }
 
 async function validatePremiumServiceConfigEndpoints(config) {
