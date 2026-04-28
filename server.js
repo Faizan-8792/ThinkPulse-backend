@@ -21,9 +21,25 @@ const {
 const {
   rewardsRouter
 } = require("./src/routes/rewards");
+const {
+  authenticateRequest,
+  requireRole
+} = require("./src/security/auth");
+const {
+  attachRequestContext,
+  logSecurityEvent
+} = require("./src/security/logger");
+const {
+  createGlobalIpRateLimiter
+} = require("./src/security/rate_limit");
+const {
+  enforceWebhookReplayProtection,
+  toEpochMs
+} = require("./src/security/webhook_security");
 
 const app = express();
 const port = Number(process.env.PORT || 8080);
+const globalIpRateLimiter = createGlobalIpRateLimiter();
 
 const mode = String(process.env.MODE || "test").trim().toLowerCase() === "live" ? "live" : "test";
 const stripeSecretKey = mode === "live"
@@ -228,6 +244,8 @@ app.disable("x-powered-by");
 app.use(helmet({
   contentSecurityPolicy: false
 }));
+app.use(attachRequestContext);
+app.use(globalIpRateLimiter);
 app.use(cors({
   origin(origin, callback) {
     const safeOrigin = String(origin || "").trim();
@@ -350,7 +368,7 @@ app.get("/config/public", (_req, res) => {
   });
 });
 
-app.get("/config/default-pools", (_req, res) => {
+app.get("/config/default-pools", authenticateRequest(), requireRole("admin"), (_req, res) => {
   res.json({
     ok: true,
     data: envBootstrapConfig,
@@ -393,7 +411,7 @@ app.get("/stripe/webhook", (_req, res) => {
 app.get("/webhook", sendRazorpayWebhookStatus);
 app.get("/webhooks", sendRazorpayWebhookStatus);
 
-app.post("/stripe/webhook", express.raw({ type: "application/json" }), (req, res) => {
+app.post("/stripe/webhook", express.raw({ type: "application/json" }), async (req, res) => {
   if (!stripe || !webhookSecret) {
     res.status(500).json({ ok: false, error: "Stripe webhook is not configured." });
     return;
@@ -410,6 +428,23 @@ app.post("/stripe/webhook", express.raw({ type: "application/json" }), (req, res
     event = stripe.webhooks.constructEvent(req.body, signature, webhookSecret);
   } catch (error) {
     res.status(400).json({ ok: false, error: error.message || "Webhook signature verification failed." });
+    return;
+  }
+
+  const stripeReplay = await enforceWebhookReplayProtection({
+    provider: "stripe",
+    replayKey: String(event?.id || signature || "").trim(),
+    occurredAtMs: toEpochMs(event?.created),
+    maxAgeMs: 30 * 60 * 1000,
+    ttlMs: 24 * 60 * 60 * 1000
+  });
+  if (!stripeReplay.ok) {
+    logSecurityEvent("stripe_webhook_rejected", {
+      reason: stripeReplay.reason,
+      eventId: String(event?.id || "").trim(),
+      path: "/stripe/webhook"
+    }, "warn");
+    res.status(stripeReplay.statusCode || 409).json({ ok: false, error: stripeReplay.error || "Webhook rejected." });
     return;
   }
 
@@ -431,7 +466,7 @@ const rawJsonWebhookParser = express.raw({ type: "application/json" });
 app.post("/webhook", rawJsonWebhookParser, razorpayWebhookHandler);
 app.post("/webhooks", rawJsonWebhookParser, razorpayWebhookHandler);
 
-app.use(express.json());
+app.use(express.json({ limit: "256kb" }));
 
 app.use("/", usersRouter);
 app.use("/", rewardsRouter);

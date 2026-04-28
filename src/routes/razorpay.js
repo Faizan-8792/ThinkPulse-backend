@@ -41,6 +41,27 @@ const {
   getTrackedTransactionByQrId,
   getTrackedTransactionByRefs
 } = require("../payments/transaction_store");
+const {
+  authenticateRequest,
+  requireSelfOrAdmin
+} = require("../security/auth");
+const {
+  createIdempotencyMiddleware
+} = require("../security/idempotency");
+const {
+  createUserRateLimiter
+} = require("../security/rate_limit");
+const {
+  enforceWebhookReplayProtection,
+  toEpochMs
+} = require("../security/webhook_security");
+const {
+  z,
+  validateRequest,
+  safeString,
+  optionalSafeString,
+  emailSchema
+} = require("../security/validation");
 
 const router = express.Router();
 
@@ -253,6 +274,134 @@ function setNoStoreHeaders(res) {
   res.set("Expires", "0");
 }
 
+const walletParamsSchema = z.object({
+  userId: emailSchema
+});
+const createOrderBodySchema = z.object({
+  amount: z.coerce.number().positive(),
+  email: emailSchema.optional(),
+  userId: emailSchema.optional(),
+  user_id: emailSchema.optional(),
+  notes: z.record(z.any()).optional()
+}).passthrough();
+const createQrBodySchema = z.object({
+  amount: z.coerce.number().positive(),
+  kind: z.enum(["wallet_topup", "plan_purchase"]).optional(),
+  email: emailSchema.optional(),
+  userId: emailSchema.optional(),
+  user_id: emailSchema.optional(),
+  description: optionalSafeString(180)
+}).passthrough();
+const qrIdParamsSchema = z.object({
+  qrId: safeString(140)
+});
+const qrStatusQuerySchema = z.object({
+  email: emailSchema.optional(),
+  userId: emailSchema.optional(),
+  user_id: emailSchema.optional()
+}).passthrough();
+const verifyPaymentBodySchema = z.object({
+  razorpay_order_id: optionalSafeString(120),
+  orderId: optionalSafeString(120),
+  razorpay_payment_id: optionalSafeString(120),
+  paymentId: optionalSafeString(120),
+  razorpay_signature: optionalSafeString(200),
+  signature: optionalSafeString(200),
+  amount: z.coerce.number().positive().optional(),
+  kind: optionalSafeString(40),
+  email: emailSchema.optional(),
+  userId: emailSchema.optional(),
+  user_id: emailSchema.optional()
+}).passthrough();
+
+router.use(authenticateRequest());
+router.use("/wallet/:userId", requireSelfOrAdmin([
+  { source: "params", key: "userId" }
+]));
+router.use(
+  "/create-order",
+  requireSelfOrAdmin([
+    { source: "body", key: "email" },
+    { source: "body", key: "userId" },
+    { source: "body", key: "user_id" }
+  ]),
+  createUserRateLimiter({
+    scope: "payments",
+    windowMs: 60 * 1000,
+    max: 5,
+    keyResolver: (req) => String(req.user?.email || "").trim().toLowerCase(),
+    message: "Too many payment-related requests. Please slow down."
+  }),
+  createIdempotencyMiddleware({
+    scope: "create_order",
+    ttlMs: 10 * 60 * 1000
+  })
+);
+router.use(
+  "/create-qr",
+  requireSelfOrAdmin([
+    { source: "body", key: "email" },
+    { source: "body", key: "userId" },
+    { source: "body", key: "user_id" }
+  ]),
+  createUserRateLimiter({
+    scope: "payments",
+    windowMs: 60 * 1000,
+    max: 5,
+    keyResolver: (req) => String(req.user?.email || "").trim().toLowerCase(),
+    message: "Too many payment-related requests. Please slow down."
+  }),
+  createIdempotencyMiddleware({
+    scope: "create_qr",
+    ttlMs: 10 * 60 * 1000
+  })
+);
+router.use(
+  "/transaction-status/:qrId",
+  createUserRateLimiter({
+    scope: "payment_status",
+    windowMs: 60 * 1000,
+    max: 60,
+    keyResolver: (req) => String(req.user?.email || "").trim().toLowerCase(),
+    message: "Too many payment status checks. Please slow down."
+  })
+);
+router.use(
+  "/qr-status/:qrId",
+  requireSelfOrAdmin([
+    { source: "query", key: "email" },
+    { source: "query", key: "userId" },
+    { source: "query", key: "user_id" }
+  ]),
+  createUserRateLimiter({
+    scope: "payment_status",
+    windowMs: 60 * 1000,
+    max: 60,
+    keyResolver: (req) => String(req.user?.email || "").trim().toLowerCase(),
+    message: "Too many payment status checks. Please slow down."
+  })
+);
+router.use(
+  "/verify-payment",
+  requireSelfOrAdmin([
+    { source: "body", key: "email" },
+    { source: "body", key: "userId" },
+    { source: "body", key: "user_id" }
+  ]),
+  createUserRateLimiter({
+    scope: "payments",
+    windowMs: 60 * 1000,
+    max: 5,
+    keyResolver: (req) => String(req.user?.email || "").trim().toLowerCase(),
+    message: "Too many payment-related requests. Please slow down."
+  }),
+  createIdempotencyMiddleware({
+    scope: "verify_payment",
+    ttlMs: 24 * 60 * 60 * 1000,
+    deriveKey: (req) => `${String(req.body?.razorpay_order_id || req.body?.orderId || "").trim()}:${String(req.body?.razorpay_payment_id || req.body?.paymentId || "").trim()}`
+  })
+);
+
 /**
  * Persists paid payment and updates user plan state.
  * @param {{userId:string,paymentId:string,status:string,amountInr:number,createdAt?:number|string|Date}} payload
@@ -297,7 +446,7 @@ async function persistPaymentAndPlan(payload) {
   };
 }
 
-router.get("/wallet/:userId", async (req, res) => {
+router.get("/wallet/:userId", validateRequest({ params: walletParamsSchema }), async (req, res) => {
   const userId = toSafeString(req.params?.userId, 180).toLowerCase();
   if (!userId) {
     res.status(400).json({
@@ -323,7 +472,7 @@ router.get("/wallet/:userId", async (req, res) => {
   }
 });
 
-router.post("/create-order", async (req, res) => {
+router.post("/create-order", validateRequest({ body: createOrderBodySchema }), async (req, res) => {
   if (!isRazorpayConfigured()) {
     res.status(503).json({
       ok: false,
@@ -346,6 +495,13 @@ router.post("/create-order", async (req, res) => {
     res.status(400).json({
       ok: false,
       error: "userId (or email) is required."
+    });
+    return;
+  }
+  if (String(req.user?.role || "").trim().toLowerCase() !== "admin" && userId.toLowerCase() !== String(req.user?.email || "").trim().toLowerCase()) {
+    res.status(403).json({
+      ok: false,
+      error: "Payment order does not belong to the authenticated user."
     });
     return;
   }
@@ -372,16 +528,16 @@ router.post("/create-order", async (req, res) => {
 
 router.get("/create-qr", (_req, res) => {
   res.status(405).json({
-      ok: false,
-      error: "Use POST /create-qr with JSON body.",
-      expectedBody: {
-        amount: ALLOWED_AMOUNTS_INR[0],
+    ok: false,
+    error: "Use POST /create-qr with JSON body.",
+    expectedBody: {
+      amount: ALLOWED_AMOUNTS_INR[0],
       userId: "user@example.com"
     }
   });
 });
 
-router.post("/create-qr", async (req, res) => {
+router.post("/create-qr", validateRequest({ body: createQrBodySchema }), async (req, res) => {
   if (!isRazorpayConfigured()) {
     res.status(503).json({
       ok: false,
@@ -412,6 +568,13 @@ router.post("/create-qr", async (req, res) => {
     res.status(400).json({
       ok: false,
       error: "userId (or email) is required."
+    });
+    return;
+  }
+  if (String(req.user?.role || "").trim().toLowerCase() !== "admin" && userId.toLowerCase() !== String(req.user?.email || "").trim().toLowerCase()) {
+    res.status(403).json({
+      ok: false,
+      error: "Payment QR does not belong to the authenticated user."
     });
     return;
   }
@@ -557,7 +720,7 @@ router.post("/create-qr", async (req, res) => {
   }
 });
 
-router.get("/transaction-status/:qrId", (req, res) => {
+router.get("/transaction-status/:qrId", validateRequest({ params: qrIdParamsSchema }), (req, res) => {
   setNoStoreHeaders(res);
 
   const qrId = toSafeString(req.params?.qrId, 140);
@@ -583,6 +746,18 @@ router.get("/transaction-status/:qrId", (req, res) => {
 
   const transaction = transactionByQrId || fallbackResolved.transaction;
 
+  if (
+    String(req.user?.role || "").trim().toLowerCase() !== "admin" &&
+    String(transaction?.userId || "").trim() &&
+    String(transaction?.userId || "").trim().toLowerCase() !== String(req.user?.email || "").trim().toLowerCase()
+  ) {
+    res.status(403).json({
+      ok: false,
+      error: "Transaction does not belong to the authenticated user."
+    });
+    return;
+  }
+
   res.json({
     ok: true,
     found: Boolean(transaction),
@@ -591,7 +766,7 @@ router.get("/transaction-status/:qrId", (req, res) => {
   });
 });
 
-router.get("/qr-status/:qrId", async (req, res) => {
+router.get("/qr-status/:qrId", validateRequest({ params: qrIdParamsSchema, query: qrStatusQuerySchema }), async (req, res) => {
   setNoStoreHeaders(res);
 
   if (!isRazorpayConfigured()) {
@@ -806,6 +981,13 @@ router.get("/qr-status/:qrId", async (req, res) => {
 
     const qr = await fetchQrCode(qrId);
     const qrUserId = pickUserId(qr?.notes);
+    if (String(req.user?.role || "").trim().toLowerCase() !== "admin" && qrUserId && qrUserId.toLowerCase() !== String(req.user?.email || "").trim().toLowerCase()) {
+      res.status(403).json({
+        ok: false,
+        error: "QR does not belong to the authenticated user."
+      });
+      return;
+    }
 
     if (
       requesterUserId &&
@@ -903,7 +1085,7 @@ router.get("/qr-status/:qrId", async (req, res) => {
   }
 });
 
-router.post("/verify-payment", async (req, res) => {
+router.post("/verify-payment", validateRequest({ body: verifyPaymentBodySchema }), async (req, res) => {
   if (!isRazorpayConfigured()) {
     res.status(503).json({
       ok: false,
@@ -973,6 +1155,14 @@ router.post("/verify-payment", async (req, res) => {
         ok: false,
         verified: false,
         error: "userId (or email) is required for payment persistence."
+      });
+      return;
+    }
+    if (String(req.user?.role || "").trim().toLowerCase() !== "admin" && userId.toLowerCase() !== String(req.user?.email || "").trim().toLowerCase()) {
+      res.status(403).json({
+        ok: false,
+        verified: false,
+        error: "Payment verification does not belong to the authenticated user."
       });
       return;
     }
@@ -1082,6 +1272,28 @@ async function razorpayWebhookHandler(req, res) {
     res.status(400).json({
       ok: false,
       error: "Invalid webhook payload JSON."
+    });
+    return;
+  }
+
+  const razorpayReplay = await enforceWebhookReplayProtection({
+    provider: "razorpay",
+    replayKey: String(req.headers["x-razorpay-event-id"] || "").trim() || [
+      signature,
+      toSafeString(event?.event, 80),
+      toSafeString(event?.payload?.payment?.entity?.id, 120),
+      toSafeString(event?.payload?.order?.entity?.id, 120),
+      toSafeString(event?.created_at, 80)
+    ].filter(Boolean).join("|"),
+    occurredAtMs: toEpochMs(event?.created_at || 0),
+    maxAgeMs: 24 * 60 * 60 * 1000,
+    ttlMs: 24 * 60 * 60 * 1000
+  });
+  if (!razorpayReplay.ok) {
+    console.warn(`[razorpay-webhook] replay_guard path=${webhookPath} accepted=false reason=${razorpayReplay.reason}`);
+    res.status(razorpayReplay.statusCode || 409).json({
+      ok: false,
+      error: razorpayReplay.error || "Webhook rejected."
     });
     return;
   }

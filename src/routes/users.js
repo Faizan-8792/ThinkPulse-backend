@@ -25,6 +25,28 @@ const {
   recordAdminWalletCredit
 } = require("../rewards/rewards_store");
 
+const {
+  authenticateRequest,
+  requireRole,
+  requireSelfOrAdmin
+} = require("../security/auth");
+const {
+  createIdempotencyMiddleware
+} = require("../security/idempotency");
+const {
+  validatePremiumServiceConfigEndpoints
+} = require("../security/network");
+const {
+  createUserRateLimiter
+} = require("../security/rate_limit");
+const {
+  z,
+  validateRequest,
+  safeString,
+  optionalSafeString,
+  emailSchema
+} = require("../security/validation");
+
 const router = express.Router();
 const PREMIUM_SERVICE_APIS_SETTING_KEY = "premium_service_apis_v1";
 const USER_STATE_NAMESPACES = new Set([
@@ -76,6 +98,107 @@ function normalizeInrAmount(value) {
   return Math.round(numeric * 100) / 100;
 }
 
+const premiumApiEntrySchema = z.object({
+  provider: safeString(40),
+  key: safeString(500),
+  model: optionalSafeString(200),
+  endpoint: optionalSafeString(2000),
+  enabled: z.boolean().optional(),
+  order: z.coerce.number().int().min(0).max(1000).optional()
+}).passthrough();
+const premiumApiConfigSchema = z.object({
+  multiApiMode: z.boolean().optional(),
+  chatApis: z.array(premiumApiEntrySchema).max(50).optional(),
+  ocrApis: z.array(premiumApiEntrySchema).max(50).optional(),
+  asrApis: z.array(premiumApiEntrySchema).max(50).optional(),
+  imageApis: z.array(premiumApiEntrySchema).max(50).optional(),
+  webSearch: z.object({
+    tavily: z.array(safeString(500)).max(50).optional(),
+    serper: z.array(safeString(500)).max(50).optional()
+  }).passthrough().optional()
+}).passthrough();
+const premiumApiWriteSchema = z.object({
+  premiumApis: premiumApiConfigSchema.optional(),
+  config: premiumApiConfigSchema.optional()
+}).passthrough();
+const userStateParamsSchema = z.object({
+  namespace: z.enum(["billing", "account"]),
+  email: emailSchema
+});
+const userStateWriteSchema = z.object({
+  value: z.record(z.any()).optional()
+}).passthrough();
+const userStateListQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(5000).optional()
+}).passthrough();
+const userUpsertBodySchema = z.object({
+  email: emailSchema.optional(),
+  userId: emailSchema.optional(),
+  user_id: emailSchema.optional()
+}).passthrough();
+const adminSetPlanBodySchema = z.object({
+  email: emailSchema.optional(),
+  userId: emailSchema.optional(),
+  user_id: emailSchema.optional(),
+  plan: z.enum(["free", "basic", "premium", "admin"])
+}).passthrough();
+const userPlanParamsSchema = z.object({
+  email: emailSchema
+});
+const adminCreditWalletBodySchema = z.object({
+  email: emailSchema.optional(),
+  userId: emailSchema.optional(),
+  user_id: emailSchema.optional(),
+  amountInr: z.coerce.number().positive().max(100000).optional(),
+  amount: z.coerce.number().positive().max(100000).optional(),
+  note: optionalSafeString(80),
+  actorEmail: emailSchema.optional()
+}).passthrough();
+const adminDeleteBodySchema = z.object({
+  email: emailSchema.optional(),
+  userId: emailSchema.optional(),
+  user_id: emailSchema.optional()
+}).passthrough();
+
+function resolvePremiumApiPayload(body) {
+  if (body?.premiumApis && typeof body.premiumApis === "object") {
+    return body.premiumApis;
+  }
+  if (body?.config && typeof body.config === "object") {
+    return body.config;
+  }
+  return {};
+}
+
+router.use(authenticateRequest());
+router.use("/config/premium-service-apis", requireRole("premium"));
+router.use("/admin", requireRole("admin"));
+router.use("/users/state/:namespace/:email", requireSelfOrAdmin([
+  { source: "params", key: "email" }
+]));
+router.use("/users/upsert", requireSelfOrAdmin([
+  { source: "body", key: "email" },
+  { source: "body", key: "userId" },
+  { source: "body", key: "user_id" }
+]));
+router.use("/users/plan/:email", requireSelfOrAdmin([
+  { source: "params", key: "email" }
+]));
+router.use(
+  "/admin/users/credit-wallet",
+  createUserRateLimiter({
+    scope: "payments",
+    windowMs: 60 * 1000,
+    max: 5,
+    keyResolver: (req) => String(req.user?.email || "").trim().toLowerCase(),
+    message: "Too many payment-related requests. Please slow down."
+  }),
+  createIdempotencyMiddleware({
+    scope: "admin_wallet_credit",
+    ttlMs: 10 * 60 * 1000
+  })
+);
+
 router.get("/config/premium-service-apis", async (_req, res) => {
   if (!isSupabaseConfigured()) {
     res.status(503).json({
@@ -101,7 +224,7 @@ router.get("/config/premium-service-apis", async (_req, res) => {
   }
 });
 
-router.get("/admin/config/premium-service-apis", async (_req, res) => {
+router.post("/admin/config/premium-service-apis", validateRequest({ body: premiumApiWriteSchema }), async (req, res) => {
   if (!isSupabaseConfigured()) {
     res.status(503).json({
       ok: false,
@@ -111,37 +234,7 @@ router.get("/admin/config/premium-service-apis", async (_req, res) => {
   }
 
   try {
-    const stored = await getGlobalJsonConfig(PREMIUM_SERVICE_APIS_SETTING_KEY);
-    res.json({
-      ok: true,
-      premiumApis: stored?.found ? stored.value || {} : {},
-      source: stored?.table || "",
-      found: Boolean(stored?.found)
-    });
-  } catch (error) {
-    res.status(500).json({
-      ok: false,
-      error: error?.message || "Unable to load premium API settings."
-    });
-  }
-});
-
-router.post("/admin/config/premium-service-apis", async (req, res) => {
-  if (!isSupabaseConfigured()) {
-    res.status(503).json({
-      ok: false,
-      error: "Supabase is not configured on the server."
-    });
-    return;
-  }
-
-  try {
-    const payload =
-      req.body?.premiumApis && typeof req.body.premiumApis === "object"
-        ? req.body.premiumApis
-        : req.body?.config && typeof req.body.config === "object"
-          ? req.body.config
-          : {};
+    const payload = await validatePremiumServiceConfigEndpoints(resolvePremiumApiPayload(req.body));
     const stored = await upsertGlobalJsonConfig(PREMIUM_SERVICE_APIS_SETTING_KEY, payload);
     if (!stored?.stored) {
       throw new Error(stored?.reason || "Premium API settings table is not ready.");
@@ -160,7 +253,7 @@ router.post("/admin/config/premium-service-apis", async (req, res) => {
   }
 });
 
-router.get("/users/state/:namespace/:email", async (req, res) => {
+router.get("/users/state/:namespace/:email", validateRequest({ params: userStateParamsSchema }), async (req, res) => {
   if (!isSupabaseConfigured()) {
     res.status(503).json({
       ok: false,
@@ -204,7 +297,7 @@ router.get("/users/state/:namespace/:email", async (req, res) => {
   }
 });
 
-router.post("/users/state/:namespace/:email", async (req, res) => {
+router.post("/users/state/:namespace/:email", validateRequest({ params: userStateParamsSchema, body: userStateWriteSchema }), async (req, res) => {
   if (!isSupabaseConfigured()) {
     res.status(503).json({
       ok: false,
@@ -256,7 +349,7 @@ router.post("/users/state/:namespace/:email", async (req, res) => {
   }
 });
 
-router.delete("/users/state/:namespace/:email", async (req, res) => {
+router.delete("/users/state/:namespace/:email", validateRequest({ params: userStateParamsSchema }), async (req, res) => {
   if (!isSupabaseConfigured()) {
     res.status(503).json({
       ok: false,
@@ -300,7 +393,7 @@ router.delete("/users/state/:namespace/:email", async (req, res) => {
   }
 });
 
-router.get("/admin/users/state/:namespace", async (req, res) => {
+router.get("/admin/users/state/:namespace", validateRequest({ query: userStateListQuerySchema }), async (req, res) => {
   if (!isSupabaseConfigured()) {
     res.status(503).json({
       ok: false,
@@ -334,7 +427,7 @@ router.get("/admin/users/state/:namespace", async (req, res) => {
   }
 });
 
-router.post("/users/upsert", async (req, res) => {
+router.post("/users/upsert", validateRequest({ body: userUpsertBodySchema }), async (req, res) => {
   if (!isSupabaseConfigured()) {
     res.status(503).json({
       ok: false,
@@ -394,7 +487,7 @@ router.get("/admin/users", async (_req, res) => {
   }
 });
 
-router.post("/admin/users/set-plan", async (req, res) => {
+router.post("/admin/users/set-plan", validateRequest({ body: adminSetPlanBodySchema }), async (req, res) => {
   if (!isSupabaseConfigured()) {
     res.status(503).json({
       ok: false,
@@ -448,7 +541,7 @@ router.post("/admin/users/set-plan", async (req, res) => {
   }
 });
 
-router.get("/users/plan/:email", async (req, res) => {
+router.get("/users/plan/:email", validateRequest({ params: userPlanParamsSchema }), async (req, res) => {
   if (!isSupabaseConfigured()) {
     res.status(503).json({
       ok: false,
@@ -483,11 +576,11 @@ router.get("/users/plan/:email", async (req, res) => {
   }
 });
 
-router.post("/admin/users/credit-wallet", async (req, res) => {
+router.post("/admin/users/credit-wallet", validateRequest({ body: adminCreditWalletBodySchema }), async (req, res) => {
   const email = normalizeEmail(req.body?.email || req.body?.userId || req.body?.user_id);
   const amountInr = normalizeInrAmount(req.body?.amountInr || req.body?.amount);
   const note = String(req.body?.note || "admin_wallet_credit").trim().slice(0, 80) || "admin_wallet_credit";
-  const actorEmail = normalizeEmail(req.body?.actorEmail);
+  const actorEmail = normalizeEmail(req.user?.email || req.body?.actorEmail);
 
   if (!email) {
     res.status(400).json({
@@ -538,7 +631,7 @@ router.post("/admin/users/credit-wallet", async (req, res) => {
   }
 });
 
-router.post("/admin/users/delete", async (req, res) => {
+router.post("/admin/users/delete", validateRequest({ body: adminDeleteBodySchema }), async (req, res) => {
   const email = normalizeEmail(req.body?.email || req.body?.userId || req.body?.user_id);
   if (!email) {
     res.status(400).json({
