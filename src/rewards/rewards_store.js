@@ -10,6 +10,7 @@ const { resolveStorePath } = require("../storage/store_path");
 const JOINING_BONUS_PAISE = 1500;
 const MAX_NOTIFICATIONS = 6000;
 const MAX_REWARD_EVENTS = 6000;
+const MAX_NOTIFICATION_RECEIPTS_PER_EMAIL = 600;
 const MAX_PROMO_REDEMPTIONS = 500;
 const rewardsStorePath = resolveStorePath(process.env.REWARDS_STORE_PATH, "rewards.json");
 
@@ -17,6 +18,7 @@ let store = {
   promos: {},
   bonusProfiles: {},
   notifications: [],
+  notificationReceipts: {},
   rewardEvents: [],
   updatedAt: Date.now()
 };
@@ -279,6 +281,52 @@ function normalizeNotification(value) {
 }
 
 /**
+ * Builds stable receipt key for consume-once notifications.
+ * @param {object|null|undefined} value
+ * @returns {string}
+ */
+function buildNotificationReceiptKey(value) {
+  const dedupeKey = toSafeString(value?.dedupeKey, 120);
+  if (dedupeKey) {
+    return `dedupe:${dedupeKey}`;
+  }
+  return "";
+}
+
+/**
+ * Normalizes persisted notification receipt store.
+ * @param {any} value
+ * @returns {object}
+ */
+function normalizeNotificationReceiptStore(value) {
+  const receipts = {};
+  for (const [rawEmail, rawEntries] of Object.entries(value && typeof value === "object" ? value : {})) {
+    const email = normalizeEmail(rawEmail);
+    if (!email || !rawEntries || typeof rawEntries !== "object") {
+      continue;
+    }
+
+    const normalizedEntries = Object.entries(rawEntries)
+      .map(([rawKey, rawAt]) => {
+        const key = toSafeString(rawKey, 160);
+        const at = Math.max(0, toEpochMs(rawAt));
+        return key && at > 0 ? [key, at] : null;
+      })
+      .filter(Boolean)
+      .sort((left, right) => Number(right[1] || 0) - Number(left[1] || 0))
+      .slice(0, MAX_NOTIFICATION_RECEIPTS_PER_EMAIL);
+
+    if (!normalizedEntries.length) {
+      continue;
+    }
+
+    receipts[email] = Object.fromEntries(normalizedEntries);
+  }
+
+  return receipts;
+}
+
+/**
  * Normalizes one reward event entry.
  * @param {any} value
  * @returns {object|null}
@@ -387,6 +435,7 @@ function normalizePromoRecord(value, fallbackCode = "") {
 function normalizeStore(raw) {
   const promos = {};
   const bonusProfiles = {};
+  const notificationReceipts = normalizeNotificationReceiptStore(raw?.notificationReceipts);
 
   for (const [rawCode, value] of Object.entries(raw?.promos && typeof raw.promos === "object" ? raw.promos : {})) {
     const promo = normalizePromoRecord(value, rawCode);
@@ -419,6 +468,7 @@ function normalizeStore(raw) {
     promos,
     bonusProfiles,
     notifications,
+    notificationReceipts,
     rewardEvents,
     updatedAt: toEpochMs(raw?.updatedAt) || Date.now()
   };
@@ -487,11 +537,19 @@ async function appendNotification(value) {
     return null;
   }
 
+  const receiptKey = buildNotificationReceiptKey(notification);
+  const knownReceipts =
+    store.notificationReceipts?.[notification.email] && typeof store.notificationReceipts[notification.email] === "object"
+      ? store.notificationReceipts[notification.email]
+      : null;
+  if (receiptKey && Number(knownReceipts?.[receiptKey] || 0) > 0) {
+    return null;
+  }
+
   if (notification.dedupeKey) {
     const existing = store.notifications.find((entry) =>
       entry.email === notification.email &&
-      entry.dedupeKey === notification.dedupeKey &&
-      Number(entry.readAt || 0) === 0
+      entry.dedupeKey === notification.dedupeKey
     );
     if (existing) {
       return existing;
@@ -509,6 +567,58 @@ async function appendNotification(value) {
 }
 
 /**
+ * Persists consume-once receipt for a notification dedupe key.
+ * @param {string} email
+ * @param {string} receiptKey
+ * @param {number=} consumedAt
+ * @returns {void}
+ */
+function rememberNotificationReceipt(email, receiptKey, consumedAt = Date.now()) {
+  const safeEmail = normalizeEmail(email);
+  const safeReceiptKey = toSafeString(receiptKey, 160);
+  const safeConsumedAt = Math.max(0, toEpochMs(consumedAt) || Date.now());
+  if (!safeEmail || !safeReceiptKey) {
+    return;
+  }
+
+  const current =
+    store.notificationReceipts?.[safeEmail] && typeof store.notificationReceipts[safeEmail] === "object"
+      ? { ...store.notificationReceipts[safeEmail] }
+      : {};
+  current[safeReceiptKey] = safeConsumedAt;
+  store.notificationReceipts = {
+    ...(store.notificationReceipts && typeof store.notificationReceipts === "object" ? store.notificationReceipts : {}),
+    [safeEmail]: Object.fromEntries(
+      Object.entries(current)
+        .sort((left, right) => Number(right[1] || 0) - Number(left[1] || 0))
+        .slice(0, MAX_NOTIFICATION_RECEIPTS_PER_EMAIL)
+    )
+  };
+}
+
+/**
+ * Consumes one backend notification dedupe key so it never reappears.
+ * @param {string} email
+ * @param {string} dedupeKey
+ * @returns {Promise<void>}
+ */
+async function consumeNotificationByDedupeKey(email, dedupeKey) {
+  ensureLoaded();
+  const safeEmail = normalizeEmail(email);
+  const safeDedupeKey = toSafeString(dedupeKey, 120);
+  if (!safeEmail || !safeDedupeKey) {
+    return;
+  }
+
+  const receiptKey = buildNotificationReceiptKey({ dedupeKey: safeDedupeKey });
+  rememberNotificationReceipt(safeEmail, receiptKey);
+  store.notifications = store.notifications.filter((entry) =>
+    !(entry.email === safeEmail && entry.dedupeKey === safeDedupeKey)
+  );
+  await persistStore();
+}
+
+/**
  * Marks one notification as read for one email.
  * @param {string} email
  * @param {string} notificationId
@@ -523,16 +633,22 @@ async function markNotificationRead(email, notificationId) {
   }
 
   let updated = null;
-  store.notifications = store.notifications.map((entry) => {
-    if (entry.email !== safeEmail || entry.id !== safeId) {
-      return entry;
+  const nextNotifications = [];
+  for (const entry of store.notifications) {
+    if (entry.email === safeEmail && entry.id === safeId) {
+      updated = normalizeNotification({
+        ...entry,
+        readAt: entry.readAt || Date.now()
+      });
+      const receiptKey = buildNotificationReceiptKey(updated);
+      if (receiptKey) {
+        rememberNotificationReceipt(safeEmail, receiptKey, updated.readAt || Date.now());
+      }
+      continue;
     }
-    updated = normalizeNotification({
-      ...entry,
-      readAt: entry.readAt || Date.now()
-    });
-    return updated;
-  });
+    nextNotifications.push(entry);
+  }
+  store.notifications = nextNotifications;
 
   if (updated) {
     await persistStore();
@@ -844,6 +960,7 @@ async function claimJoiningBonus(email) {
     updatedAt: claimedAt
   });
   await persistStore();
+  await consumeNotificationByDedupeKey(safeEmail, `joining_bonus_available:${safeEmail}`);
 
   await appendRewardEvent({
     kind: "joining_bonus",
