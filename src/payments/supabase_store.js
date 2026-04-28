@@ -1,6 +1,7 @@
 "use strict";
 
 const { createClient } = require("@supabase/supabase-js");
+const { resolvePlanByAmount } = require("./amounts");
 
 const supabaseUrl = String(process.env.SUPABASE_URL || "").trim();
 const supabaseServiceKey = String(
@@ -174,6 +175,11 @@ function extractPaymentConfigKey(paymentId) {
     return "";
   }
   return normalizeGlobalJsonConfigKey(safePaymentId.slice(PAYMENT_CONFIG_ROW_PREFIX.length));
+}
+
+function isPaidPaymentStatus(value) {
+  const status = normalizeStatus(value);
+  return status === "paid" || status === "captured";
 }
 
 async function getGlobalJsonConfigFromPayments(settingKey) {
@@ -953,7 +959,7 @@ async function listKnownUsersFromPayments(maxRows = 5000) {
 
   const { data, error } = await supabaseClient
     .from("payments")
-    .select("user_id,status,payment_id,created_at")
+    .select("user_id,amount,status,payment_id,created_at")
     .order("created_at", { ascending: false })
     .limit(safeLimit);
 
@@ -973,6 +979,8 @@ async function listKnownUsersFromPayments(maxRows = 5000) {
     const createdMs = Date.parse(String(row?.created_at || "")) || Date.now();
     const status = normalizeStatus(row?.status);
     const paymentId = String(row?.payment_id || "").trim();
+    const amountInr = Math.round((Number(row?.amount) || 0) * 100) / 100;
+    const derivedPlan = isPaidPaymentStatus(status) ? resolvePlanByAmount(amountInr) : null;
     const current = map.get(email);
 
     if (!current) {
@@ -981,9 +989,17 @@ async function listKnownUsersFromPayments(maxRows = 5000) {
         firstSeenAt: createdMs,
         lastSeenAt: createdMs,
         sourceStatus: status,
-        sourcePaymentId: paymentId
+        sourcePaymentId: paymentId,
+        plan: derivedPlan || "",
+        planSource: derivedPlan ? "payment" : "",
+        latestPaymentAmountInr: amountInr
       });
       continue;
+    }
+
+    if (derivedPlan && (!current.plan || derivedPlan === "premium")) {
+      current.plan = derivedPlan;
+      current.planSource = "payment";
     }
 
     if (createdMs < current.firstSeenAt) {
@@ -993,6 +1009,7 @@ async function listKnownUsersFromPayments(maxRows = 5000) {
       current.lastSeenAt = createdMs;
       current.sourceStatus = status;
       current.sourcePaymentId = paymentId;
+      current.latestPaymentAmountInr = amountInr;
     }
   }
 
