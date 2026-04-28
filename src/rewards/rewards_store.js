@@ -198,17 +198,27 @@ function buildInviteSeed(email) {
  * @returns {string}
  */
 function generateInviteCode(ownerEmail) {
-  const prefix = buildInviteSeed(ownerEmail);
+  buildInviteSeed(ownerEmail);
   let attempt = 0;
   while (attempt < 1000) {
-    const suffix = Math.random().toString(36).slice(2, 8).toUpperCase();
-    const candidate = sanitizePromoCode(`INV-${prefix}-${suffix}`);
+    const candidate = sanitizePromoCode(String(Math.floor(Math.random() * 900000) + 100000));
     if (candidate && !store.promos[candidate]) {
       return candidate;
     }
     attempt += 1;
   }
-  return sanitizePromoCode(`INV-${prefix}-${Date.now().toString(36).slice(-6).toUpperCase()}`);
+  const fallback = sanitizePromoCode(String(Date.now()).slice(-6));
+  if (fallback && !store.promos[fallback]) {
+    return fallback;
+  }
+  return sanitizePromoCode(String(Math.floor(Math.random() * 900000) + 100000));
+}
+
+function getPromoInstanceKey(promo, fallbackValue = Date.now()) {
+  const createdAt = Math.max(0, Number(promo?.createdAt || 0));
+  const updatedAt = Math.max(0, Number(promo?.updatedAt || 0));
+  const fallback = Math.max(0, Number(fallbackValue || 0));
+  return String(createdAt || fallback || updatedAt || Date.now());
 }
 
 /**
@@ -977,7 +987,8 @@ async function claimJoiningBonus(email) {
     kind: "joining_bonus_claimed",
     title: "Joining bonus credited",
     message: "Your welcome reward has been added to the wallet.",
-    actionTarget: "bonus"
+    actionTarget: "bonus",
+    dedupeKey: `joining-bonus-claimed:${safeEmail}`
   });
 
   return {
@@ -1083,6 +1094,7 @@ async function upsertPromoCode(input, actorEmail = "") {
 
   store.promos[promo.code] = promo;
   await persistStore();
+  const promoInstanceKey = getPromoInstanceKey(promo, now);
 
   await appendRewardEvent({
     kind: "admin_create",
@@ -1106,7 +1118,7 @@ async function upsertPromoCode(input, actorEmail = "") {
       message: inviteMessage,
       actionTarget: "bonus",
       code: promo.code,
-      dedupeKey: `promo_assigned:${assignedToEmail}:${promo.code}`
+      dedupeKey: `promo-assigned:${assignedToEmail}:${promo.code}:${promoInstanceKey}`
     });
   } else if (!assignedToEmail && promo.type !== "invite_bonus") {
     const recipients = await listKnownRewardRecipients();
@@ -1122,7 +1134,7 @@ async function upsertPromoCode(input, actorEmail = "") {
         message: `A new promo code ${promo.code} is available on your bonus page.`,
         actionTarget: "bonus",
         code: promo.code,
-        dedupeKey: `promo_assigned:${recipient}:${promo.code}`
+        dedupeKey: `promo-assigned:${recipient}:${promo.code}:${promoInstanceKey}`
       });
     }
   }
@@ -1272,9 +1284,10 @@ async function redeemPromoCode(email, rawCode) {
   }
 
   const rewardPaise = calculatePromoRewardPaise(promo);
+  const promoInstanceKey = getPromoInstanceKey(promo, now);
   let creditedEmail = safeEmail;
-  let paymentId = `promo_reward:${code}:${safeEmail}`;
-  let walletSource = `promo_reward:${code}`;
+  let paymentId = `promo_reward:${code}:${promoInstanceKey}:${safeEmail}`;
+  let walletSource = `promo_reward:${code}:${promoInstanceKey}`;
   let note = `Promo ${code} redeemed`;
   let notificationTitle = "Promo redeemed";
   let notificationMessage = `Promo ${code} has been credited to your wallet.`;
@@ -1296,8 +1309,8 @@ async function redeemPromoCode(email, rawCode) {
     }
 
     creditedEmail = promo.assignedToEmail;
-    paymentId = `invite_reward:${code}:${safeEmail}`;
-    walletSource = `invite_reward:${code}`;
+    paymentId = `invite_reward:${code}:${promoInstanceKey}:${safeEmail}`;
+    walletSource = `invite_reward:${code}:${promoInstanceKey}`;
     note = `${safeEmail} used invite code ${code}`;
     notificationTitle = "Invite reward earned";
     notificationMessage = `${safeEmail} used your invite code ${code}. Reward credited to wallet.`;
@@ -1357,7 +1370,10 @@ async function redeemPromoCode(email, rawCode) {
       title: notificationTitle,
       message: notificationMessage,
       actionTarget: "bonus",
-      code
+      code,
+      dedupeKey: promo.type === "invite_bonus"
+        ? `invite-reward:${creditedEmail}:${code}:${safeEmail}:${promoInstanceKey}`
+        : `promo-redeemed:${safeEmail}:${code}:${promoInstanceKey}`
     });
   }
 
@@ -1368,7 +1384,8 @@ async function redeemPromoCode(email, rawCode) {
       title: "Invite code accepted",
       message: `Invite code ${code} was accepted successfully.`,
       actionTarget: "bonus",
-      code
+      code,
+      dedupeKey: `invite-applied:${safeEmail}:${code}:${promoInstanceKey}`
     });
   }
 
@@ -1377,6 +1394,7 @@ async function redeemPromoCode(email, rawCode) {
     amountPaise: rewardPaise,
     creditedEmail,
     rewardMode: resultMode,
+    promoInstanceKey,
     promo: {
       code: promo.code,
       type: promo.type,
