@@ -51,7 +51,10 @@ const router = express.Router();
 const PREMIUM_SERVICE_APIS_SETTING_KEY = "premium_service_apis_v1";
 const USER_STATE_NAMESPACES = new Set([
   "billing",
-  "account"
+  "account",
+  "settings",
+  "userapis",
+  "userocrapi"
 ]);
 
 /**
@@ -122,7 +125,7 @@ const premiumApiWriteSchema = z.object({
   config: premiumApiConfigSchema.optional()
 }).passthrough();
 const userStateParamsSchema = z.object({
-  namespace: z.enum(["billing", "account"]),
+  namespace: z.enum(["billing", "account", "settings", "userapis", "userocrapi"]),
   email: emailSchema
 });
 const userStateWriteSchema = z.object({
