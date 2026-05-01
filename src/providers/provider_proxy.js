@@ -5,6 +5,7 @@ const crypto = require("crypto");
 const SYSTEM_KEY_MARKER = "system-managed";
 const ENCRYPTED_PREFIX = "enc:v1:";
 const LEGACY_OBFUSCATED_PREFIX = "fzn::";
+const PROVIDER_PROXY_VERSION = "superior-deepseek-routing-v3";
 const DEFAULT_CHAT_MODELS = {
   openrouter: "openai/gpt-4o-mini",
   gemini: "gemini-2.0-flash",
@@ -178,6 +179,20 @@ function readEnvAny(names) {
   return "";
 }
 
+function normalizeApiKey(value) {
+  const raw = String(value || "").trim().replace(/^['"]|['"]$/g, "").trim();
+  const nvidiaMatch = raw.match(/nvapi-[A-Za-z0-9_-]+/);
+  if (nvidiaMatch) {
+    return nvidiaMatch[0];
+  }
+  return raw
+    .replace(/^authorization\s*:\s*bearer\s+/i, "")
+    .replace(/^bearer\s+/i, "")
+    .replace(/^api_key\s*=\s*/i, "")
+    .replace(/^['"]|['"]$/g, "")
+    .trim();
+}
+
 function buildEnvNames(service, provider, suffix = "") {
   const safeService = normalizeService(service).toUpperCase().replace(/[^A-Z0-9]/g, "_");
   const safeProvider = normalizeProvider(provider).toUpperCase().replace(/[^A-Z0-9]/g, "_");
@@ -206,7 +221,7 @@ function getSystemApiKey(service, provider) {
     ...buildEnvNames(service, safeProvider, "API"),
     ...(ENV_ALIASES[safeProvider] || [])
   ];
-  return readEnvAny(names);
+  return normalizeApiKey(readEnvAny(names));
 }
 
 function getResolvedSystemApiKey(service, provider) {
@@ -310,7 +325,7 @@ function buildProviderProxyDiagnostics() {
     ? Boolean(getSystemApiKey("chat", superiorUpstreamProvider))
     : false;
   return {
-    version: "superior-deepseek-routing-v2",
+    version: PROVIDER_PROXY_VERSION,
     chat: {
       superior_llm: {
         keyConfigured: Boolean(getResolvedSystemApiKey("chat", superiorProvider)),
@@ -512,7 +527,7 @@ function resolveRequestApiKey(req, service, provider) {
     if (!key) {
       throw new Error(`${provider} ${service} API is not configured on the server.`);
     }
-    return key;
+    return normalizeApiKey(key);
   }
   const encryptedKey = String(body.key || body.api?.key || "").trim();
   const namespace = String(body.keyNamespace || body.api?.keyNamespace || defaultNamespaceForService(service)).trim().toLowerCase();
@@ -521,7 +536,7 @@ function resolveRequestApiKey(req, service, provider) {
   if (!key) {
     throw new Error(`${provider} BYOK API key is not configured for this user.`);
   }
-  return key;
+  return normalizeApiKey(key);
 }
 
 function defaultNamespaceForService(service) {
@@ -585,6 +600,10 @@ function sendSse(res, payload) {
 }
 
 function prepareSseResponse(res) {
+  if (res.__providerProxySsePrepared) {
+    return () => {};
+  }
+  res.__providerProxySsePrepared = true;
   res.status(200);
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache, no-transform");
@@ -593,6 +612,16 @@ function prepareSseResponse(res) {
     res.flushHeaders();
   }
   sendSse(res, { kind: "retry", content: "" });
+  const heartbeatId = setInterval(() => {
+    try {
+      if (!res.writableEnded && !res.destroyed) {
+        sendSse(res, { kind: "retry", content: "" });
+      }
+    } catch (_error) {
+      clearInterval(heartbeatId);
+    }
+  }, 15000);
+  return () => clearInterval(heartbeatId);
 }
 
 function delay(ms) {
@@ -614,10 +643,43 @@ async function fetchWithProviderTimeout(endpoint, options, timeoutMs = 120000) {
   } catch (error) {
     const failure = new Error(error?.name === "AbortError" ? "Upstream provider request timed out." : error?.message || "Upstream provider request failed.");
     failure.status = error?.name === "AbortError" ? 504 : 502;
+    failure.source = "provider_fetch";
     throw failure;
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+function sanitizeProviderErrorDetail(value) {
+  return String(value || "")
+    .replace(/nvapi-[A-Za-z0-9_-]+/g, "nvapi-***")
+    .replace(/bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer ***")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 500);
+}
+
+function buildProviderHttpError(provider, response, detail) {
+  const status = Number(response?.status || 502);
+  const contentType = sanitizeProviderErrorDetail(response?.headers?.get?.("content-type") || "");
+  const requestId = sanitizeProviderErrorDetail(
+    response?.headers?.get?.("x-request-id") ||
+    response?.headers?.get?.("x-nv-request-id") ||
+    response?.headers?.get?.("x-ms-request-id") ||
+    response?.headers?.get?.("x-azure-ref") ||
+    ""
+  );
+  const safeDetail = sanitizeProviderErrorDetail(detail);
+  const meta = [
+    `source=upstream`,
+    contentType ? `contentType=${contentType}` : "",
+    requestId ? `requestId=${requestId}` : ""
+  ].filter(Boolean).join(" ");
+  const error = new Error(`${provider} ${status}${meta ? ` ${meta}` : ""}${safeDetail ? ` ${safeDetail}` : ""}`);
+  error.status = status;
+  error.provider = provider;
+  error.source = "upstream";
+  return error;
 }
 
 async function fetchProviderResponse(endpoint, options, provider) {
@@ -631,8 +693,7 @@ async function fetchProviderResponse(endpoint, options, provider) {
         return response;
       }
       const detail = await response.text().catch(() => "");
-      lastError = new Error(`${safeProvider} ${response.status}${detail ? ` ${detail.slice(0, 240)}` : ""}`);
-      lastError.status = response.status;
+      lastError = buildProviderHttpError(safeProvider, response, detail);
     } catch (error) {
       lastError = error;
       if (attempt >= attempts || !isRetriableProviderStatus(Number(error?.status || 502))) {
@@ -647,48 +708,50 @@ async function fetchProviderResponse(endpoint, options, provider) {
 async function streamProviderResponse(response, provider, res) {
   if (!response.ok) {
     const detail = await response.text().catch(() => "");
-    const error = new Error(`${provider} ${response.status}${detail ? ` ${detail.slice(0, 240)}` : ""}`);
-    error.status = response.status;
-    throw error;
+    throw buildProviderHttpError(provider, response, detail);
   }
   if (!response.body) {
     throw new Error(`${provider} stream body missing.`);
   }
-  prepareSseResponse(res);
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) {
-      break;
+  const stopHeartbeat = prepareSseResponse(res);
+  try {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) {
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data:")) {
+          continue;
+        }
+        const data = trimmed.slice(5).trim();
+        if (!data || data === "[DONE]") {
+          continue;
+        }
+        let json = null;
+        try {
+          json = JSON.parse(data);
+        } catch (_error) {
+          continue;
+        }
+        const normalized = extractChatChunk(provider, json);
+        if (normalized.content) {
+          sendSse(res, normalized);
+        }
+      }
     }
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split(/\r?\n/);
-    buffer = lines.pop() || "";
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith("data:")) {
-        continue;
-      }
-      const data = trimmed.slice(5).trim();
-      if (!data || data === "[DONE]") {
-        continue;
-      }
-      let json = null;
-      try {
-        json = JSON.parse(data);
-      } catch (_error) {
-        continue;
-      }
-      const normalized = extractChatChunk(provider, json);
-      if (normalized.content) {
-        sendSse(res, normalized);
-      }
-    }
+    sendSse(res, { done: true });
+    res.end();
+  } finally {
+    stopHeartbeat();
   }
-  sendSse(res, { done: true });
-  res.end();
 }
 
 function extractChatChunk(provider, json) {
@@ -754,28 +817,37 @@ async function proxyChat(req, res) {
   const isNvidiaDeepSeek = upstreamProvider === "nvidia_deepseek";
   const chatEndpoint = endpoint || DEFAULT_CHAT_ENDPOINTS[provider] || DEFAULT_CHAT_ENDPOINTS[upstreamProvider] || DEFAULT_CHAT_ENDPOINTS.openai;
   const requestMessages = upstreamProvider === "deepseek" || isNvidiaDeepSeek ? textOnlyMessages(messages) : messages;
-  const response = await fetchProviderResponse(chatEndpoint, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${key}`,
-      "Content-Type": "application/json",
-      ...(upstreamProvider === "openrouter" ? { "HTTP-Referer": "https://faizanai.app", "X-Title": "FaizanAI" } : {})
-    },
-    body: JSON.stringify({
-      model: model || DEFAULT_CHAT_MODELS[provider] || DEFAULT_CHAT_MODELS.openai,
-      messages: requestMessages,
-      stream: true,
-      max_tokens: isNvidiaDeepSeek ? 16384 : upstreamProvider === "deepseek" ? 2048 : 4096,
-      ...(isNvidiaDeepSeek ? {
-        temperature: 1,
-        top_p: 0.95,
-        chat_template_kwargs: {
-          thinking: Boolean(body.deepThink || body.thinking)
-        }
-      } : {})
-    })
-  }, upstreamProvider);
-  return streamProviderResponse(response, upstreamProvider, res);
+  const stopHeartbeat = isNvidiaDeepSeek ? prepareSseResponse(res) : null;
+  try {
+    const response = await fetchProviderResponse(chatEndpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${key}`,
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+        "User-Agent": "OpenAI/JS FaizanAI-ThinkPulse",
+        ...(upstreamProvider === "openrouter" ? { "HTTP-Referer": "https://faizanai.app", "X-Title": "FaizanAI" } : {})
+      },
+      body: JSON.stringify({
+        model: model || DEFAULT_CHAT_MODELS[provider] || DEFAULT_CHAT_MODELS.openai,
+        messages: requestMessages,
+        stream: true,
+        max_tokens: isNvidiaDeepSeek ? 16384 : upstreamProvider === "deepseek" ? 2048 : 4096,
+        ...(isNvidiaDeepSeek ? {
+          temperature: 1,
+          top_p: 0.95,
+          chat_template_kwargs: {
+            thinking: Boolean(body.deepThink || body.thinking)
+          }
+        } : {})
+      })
+    }, upstreamProvider);
+    return streamProviderResponse(response, upstreamProvider, res);
+  } finally {
+    if (typeof stopHeartbeat === "function") {
+      stopHeartbeat();
+    }
+  }
 }
 
 async function proxyOcr(req, res) {
@@ -925,11 +997,19 @@ async function handleProviderProxyRequest(req, res) {
     }
     res.status(400).json({ ok: false, error: "Unsupported provider proxy service." });
   } catch (error) {
+    const payload = {
+      ok: false,
+      error: error?.message || "Provider proxy failed.",
+      status: Number(error?.status || 500),
+      source: error?.source || "provider_proxy",
+      provider: error?.provider || undefined,
+      version: PROVIDER_PROXY_VERSION
+    };
     if (!res.headersSent) {
-      res.status(Number(error?.status || 500)).json({ ok: false, error: error?.message || "Provider proxy failed." });
+      res.status(Number(error?.status || 500)).json(payload);
       return;
     }
-    sendSse(res, { error: error?.message || "Provider proxy failed." });
+    sendSse(res, { error: payload.error, status: payload.status, source: payload.source, provider: payload.provider, version: payload.version });
     res.end();
   }
 }
