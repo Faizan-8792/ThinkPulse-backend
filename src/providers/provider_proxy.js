@@ -296,6 +296,41 @@ function buildSystemApiCapabilities() {
   };
 }
 
+function buildProviderProxyDiagnostics() {
+  const superiorProvider = "superior_llm";
+  const superiorUpstreamProvider = getSystemProvider("chat", superiorProvider);
+  const superiorModel = getSystemModel("chat", superiorProvider);
+  const superiorEndpoint = resolveChatEndpoint(
+    superiorUpstreamProvider,
+    getSystemEndpoint("chat", superiorProvider),
+    DEFAULT_CHAT_ENDPOINTS[superiorUpstreamProvider] || DEFAULT_CHAT_ENDPOINTS[superiorProvider]
+  );
+  const superiorDirectKeyConfigured = Boolean(getSystemApiKey("chat", superiorProvider));
+  const superiorUpstreamKeyConfigured = superiorUpstreamProvider && superiorUpstreamProvider !== superiorProvider
+    ? Boolean(getSystemApiKey("chat", superiorUpstreamProvider))
+    : false;
+  return {
+    version: "superior-deepseek-routing-v2",
+    chat: {
+      superior_llm: {
+        keyConfigured: Boolean(getResolvedSystemApiKey("chat", superiorProvider)),
+        directKeyConfigured: superiorDirectKeyConfigured,
+        upstreamKeyConfigured: superiorUpstreamKeyConfigured,
+        upstreamProvider: superiorUpstreamProvider,
+        model: superiorModel,
+        endpoint: superiorEndpoint,
+        deepSeekModel: isNvidiaDeepSeekModel(superiorModel)
+      },
+      nvidia: {
+        keyConfigured: Boolean(getSystemApiKey("chat", "nvidia"))
+      },
+      nvidia_deepseek: {
+        keyConfigured: Boolean(getSystemApiKey("chat", "nvidia_deepseek"))
+      }
+    }
+  };
+}
+
 function getEncryptionKey() {
   const secret = readEnvAny([
     "FAIZANAI_API_KEY_ENCRYPTION_SECRET",
@@ -843,6 +878,7 @@ async function handleProviderProxyRequest(req, res) {
 module.exports = {
   SYSTEM_KEY_MARKER,
   buildSystemApiCapabilities,
+  buildProviderProxyDiagnostics,
   protectUserStatePayload,
   sanitizeSystemServiceConfig,
   decryptSecret,

@@ -22,6 +22,9 @@ const {
   rewardsRouter
 } = require("./src/routes/rewards");
 const {
+  buildProviderProxyDiagnostics
+} = require("./src/providers/provider_proxy");
+const {
   authenticateRequest,
   requireRole
 } = require("./src/security/auth");
@@ -273,6 +276,7 @@ async function buildHealthPayload() {
       errors: runtimeConfigValidation.errors,
       warnings: runtimeConfigValidation.warnings
     },
+    providerProxy: buildProviderProxyDiagnostics(),
     paymentsTable,
     timestamp: Date.now()
   };
