@@ -5,7 +5,7 @@ const crypto = require("crypto");
 const SYSTEM_KEY_MARKER = "system-managed";
 const ENCRYPTED_PREFIX = "enc:v1:";
 const LEGACY_OBFUSCATED_PREFIX = "fzn::";
-const PROVIDER_PROXY_VERSION = "superior-deepseek-routing-v4";
+const PROVIDER_PROXY_VERSION = "superior-deepseek-routing-v5";
 const DEFAULT_CHAT_MODELS = {
   openrouter: "openai/gpt-4o-mini",
   gemini: "gemini-2.0-flash",
@@ -60,7 +60,7 @@ const DEFAULT_WEB_ENDPOINTS = {
 };
 const SERVICE_PROVIDERS = {
   chat: ["superior_llm", "openrouter", "gemini", "openai", "anthropic", "deepseek", "nvidia", "nvidia_deepseek"],
-  ocr: ["superior_ocr", "ocrspace", "nvidia"],
+  ocr: ["ocrspace", "nvidia", "superior_ocr"],
   asr: ["nvidia", "openai"],
   image: ["nvidia", "openai"],
   webSearch: ["tavily", "serper"]
@@ -75,10 +75,32 @@ const ENV_ALIASES = {
   nvidia_deepseek: ["NVIDIA_DEEPSEEK_API_KEY", "NVIDIA_DEEPSEEK_API", "NVIDIA_DEEPSEEK_KEY"],
   superior_llm: ["SUPERIOR_LLM_API_KEY", "SUPERIOR_LLM_API", "SUPERIOR_LLM_KEY"],
   superior_ocr: ["SUPERIOR_OCR_API_KEY", "SUPERIOR_OCR_API", "SUPERIOR_OCR_KEY"],
-  ocrspace: ["OCRSPACE_API_KEY", "OCRSPACE_API", "OCR_SPACE_API_KEY", "OCR_SPACE_API"],
+  ocrspace: ["OCRSPACE_API_KEY", "OCRSPACE_API", "OCR_SPACE_API_KEY", "OCR_SPACE_API", "ADMIN_OCRSPACE_KEY"],
   tavily: ["TAVILY_API_KEY", "TAVILY_API"],
   serper: ["SERPER_API_KEY", "SERPER_API", "GOOGLE_SERPER_API_KEY"]
 };
+
+function getServiceEnvAliases(service, provider, suffix = "") {
+  const safeService = normalizeService(service);
+  const safeProvider = normalizeProvider(provider);
+  if (safeService === "ocr" && safeProvider === "ocrspace") {
+    return suffix === "API_KEY" || suffix === "API"
+      ? ["ADMIN_OCRSPACE_KEY"]
+      : suffix === "ENDPOINT"
+        ? ["ADMIN_OCRSPACE_ENDPOINT"]
+        : [];
+  }
+  if (safeService === "ocr" && safeProvider === "nvidia") {
+    return suffix === "API_KEY" || suffix === "API"
+      ? ["ADMIN_NVIDIA_OCR_KEY"]
+      : suffix === "ENDPOINT"
+        ? ["ADMIN_NVIDIA_OCR_ENDPOINT"]
+        : suffix === "MODEL"
+          ? ["ADMIN_NVIDIA_OCR_MODEL"]
+          : [];
+  }
+  return [];
+}
 
 function normalizeProvider(value) {
   const safe = String(value || "").trim().toLowerCase().replace(/[^a-z0-9_-]/g, "");
@@ -219,6 +241,8 @@ function getSystemApiKey(service, provider) {
   const names = [
     ...buildEnvNames(service, safeProvider, "API_KEY"),
     ...buildEnvNames(service, safeProvider, "API"),
+    ...getServiceEnvAliases(service, safeProvider, "API_KEY"),
+    ...getServiceEnvAliases(service, safeProvider, "API"),
     ...(ENV_ALIASES[safeProvider] || [])
   ];
   return normalizeApiKey(readEnvAny(names));
@@ -249,7 +273,10 @@ function getSystemModel(service, provider) {
         : safeService === "image"
           ? DEFAULT_IMAGE_MODELS
           : {};
-  return readEnvAny(buildEnvNames(safeService, safeProvider, "MODEL")) || defaults[safeProvider] || "";
+  return readEnvAny([
+    ...buildEnvNames(safeService, safeProvider, "MODEL"),
+    ...getServiceEnvAliases(safeService, safeProvider, "MODEL")
+  ]) || defaults[safeProvider] || "";
 }
 
 function getSystemEndpoint(service, provider) {
@@ -267,7 +294,10 @@ function getSystemEndpoint(service, provider) {
           ? DEFAULT_WEB_ENDPOINTS
           : {};
   const fallback = defaults[safeProvider] || "";
-  return sanitizeEndpoint(readEnvAny(buildEnvNames(safeService, safeProvider, "ENDPOINT")), fallback);
+  return sanitizeEndpoint(readEnvAny([
+    ...buildEnvNames(safeService, safeProvider, "ENDPOINT"),
+    ...getServiceEnvAliases(safeService, safeProvider, "ENDPOINT")
+  ]), fallback);
 }
 
 function buildProxyEntry(service, provider, order = 0) {
