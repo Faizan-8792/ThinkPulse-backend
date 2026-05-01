@@ -99,24 +99,42 @@ function normalizeProvider(value) {
   return safe;
 }
 
+function isSupportedProvider(service, provider) {
+  const safeService = normalizeService(service);
+  const safeProvider = normalizeProvider(provider);
+  return SERVICE_PROVIDERS[safeService]?.includes(safeProvider) === true;
+}
+
+function normalizeSystemProvider(service, value, fallback) {
+  const configured = normalizeProvider(value);
+  if (configured && isSupportedProvider(service, configured)) {
+    return configured;
+  }
+  const safeFallback = normalizeProvider(fallback);
+  if (safeFallback && isSupportedProvider(service, safeFallback)) {
+    return safeFallback;
+  }
+  return "";
+}
+
 function getSystemProvider(service, provider) {
   const safeService = normalizeService(service);
   const safeProvider = normalizeProvider(provider);
   if (safeService === "chat" && safeProvider === "superior_llm") {
-    return normalizeProvider(readEnvAny([
+    return normalizeSystemProvider("chat", readEnvAny([
       "SUPERIOR_LLM_PROVIDER",
       "SUPERIOR_LLM_UPSTREAM_PROVIDER",
       "SUPERIOR_LLM_TYPE"
-    ]) || "nvidia");
+    ]), "nvidia");
   }
   if (safeService === "ocr" && safeProvider === "superior_ocr") {
-    return normalizeProvider(readEnvAny([
+    return normalizeSystemProvider("ocr", readEnvAny([
       "SUPERIOR_OCR_PROVIDER",
       "SUPERIOR_OCR_UPSTREAM_PROVIDER",
       "SUPERIOR_OCR_TYPE"
-    ]) || "nvidia");
+    ]), "nvidia");
   }
-  return safeProvider;
+  return normalizeSystemProvider(safeService, safeProvider, safeProvider);
 }
 
 function normalizeService(value) {
@@ -208,9 +226,10 @@ function getSystemEndpoint(service, provider) {
         : safeService === "image"
           ? DEFAULT_IMAGE_ENDPOINTS
           : safeService === "webSearch"
-            ? DEFAULT_WEB_ENDPOINTS
-            : {};
-  return readEnvAny(buildEnvNames(safeService, safeProvider, "ENDPOINT")) || defaults[safeProvider] || "";
+          ? DEFAULT_WEB_ENDPOINTS
+          : {};
+  const fallback = defaults[safeProvider] || "";
+  return sanitizeEndpoint(readEnvAny(buildEnvNames(safeService, safeProvider, "ENDPOINT")), fallback);
 }
 
 function buildProxyEntry(service, provider, order = 0) {
