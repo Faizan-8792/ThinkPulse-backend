@@ -14,7 +14,7 @@ const DEFAULT_CHAT_MODELS = {
   deepseek: "deepseek-chat",
   nvidia: "meta/llama-3.1-70b-instruct",
   nvidia_deepseek: "deepseek-ai/deepseek-v4-pro",
-  superior_llm: "meta/llama-3.1-70b-instruct"
+  superior_llm: "deepseek-ai/deepseek-v4-pro"
 };
 const DEFAULT_CHAT_ENDPOINTS = {
   openrouter: "https://openrouter.ai/api/v1/chat/completions",
@@ -660,6 +660,9 @@ async function proxyChat(req, res) {
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
+  if (typeof res.flushHeaders === "function") {
+    res.flushHeaders();
+  }
 
   if (upstreamProvider === "gemini") {
     const url = new URL(endpoint || DEFAULT_CHAT_ENDPOINTS.gemini);
