@@ -117,15 +117,25 @@ function normalizeSystemProvider(service, value, fallback) {
   return "";
 }
 
+function isNvidiaDeepSeekModel(value) {
+  const safe = String(value || "").trim().toLowerCase();
+  return safe.includes("deepseek-ai/deepseek") || safe.includes("deepseek-v4") || safe.includes("deepseek-r1");
+}
+
 function getSystemProvider(service, provider) {
   const safeService = normalizeService(service);
   const safeProvider = normalizeProvider(provider);
   if (safeService === "chat" && safeProvider === "superior_llm") {
-    return normalizeSystemProvider("chat", readEnvAny([
+    const configured = readEnvAny([
       "SUPERIOR_LLM_PROVIDER",
       "SUPERIOR_LLM_UPSTREAM_PROVIDER",
       "SUPERIOR_LLM_TYPE"
-    ]), "nvidia");
+    ]);
+    const resolved = normalizeSystemProvider("chat", configured, "nvidia");
+    if ((resolved === "nvidia" || resolved === "nvidia_deepseek") && isNvidiaDeepSeekModel(getSystemModel("chat", safeProvider))) {
+      return "nvidia_deepseek";
+    }
+    return resolved;
   }
   if (safeService === "ocr" && safeProvider === "superior_ocr") {
     return normalizeSystemProvider("ocr", readEnvAny([
@@ -199,6 +209,19 @@ function getSystemApiKey(service, provider) {
   return readEnvAny(names);
 }
 
+function getResolvedSystemApiKey(service, provider) {
+  const safeProvider = normalizeProvider(provider);
+  const primary = getSystemApiKey(service, safeProvider);
+  if (primary) {
+    return primary;
+  }
+  const upstreamProvider = getSystemProvider(service, safeProvider);
+  if (upstreamProvider && upstreamProvider !== safeProvider) {
+    return getSystemApiKey(service, upstreamProvider);
+  }
+  return "";
+}
+
 function getSystemModel(service, provider) {
   const safeService = normalizeService(service);
   const safeProvider = normalizeProvider(provider);
@@ -235,7 +258,7 @@ function getSystemEndpoint(service, provider) {
 function buildProxyEntry(service, provider, order = 0) {
   const safeService = normalizeService(service);
   const safeProvider = normalizeProvider(provider);
-  if (!getSystemApiKey(safeService, safeProvider)) {
+  if (!getResolvedSystemApiKey(safeService, safeProvider)) {
     return null;
   }
   return {
@@ -414,6 +437,9 @@ function sanitizeSystemServiceConfig(value) {
       if (!SERVICE_PROVIDERS[service]?.includes(provider)) {
         return null;
       }
+      if (!getResolvedSystemApiKey(service, provider)) {
+        return null;
+      }
       return {
         ...entry,
         provider,
@@ -447,7 +473,7 @@ function resolveRequestApiKey(req, service, provider) {
   const body = req.body && typeof req.body === "object" ? req.body : {};
   const keySource = String(body.keySource || body.api?.keySource || "system").trim().toLowerCase();
   if (keySource === "system" || keySource === "env") {
-    const key = getSystemApiKey(service, provider);
+    const key = getResolvedSystemApiKey(service, provider);
     if (!key) {
       throw new Error(`${provider} ${service} API is not configured on the server.`);
     }
@@ -484,6 +510,23 @@ function sanitizeEndpoint(value, fallback) {
   } catch (_error) {
     return fallback;
   }
+}
+
+function resolveChatEndpoint(upstreamProvider, endpoint, fallback) {
+  const safeProvider = normalizeProvider(upstreamProvider);
+  const safeFallback = fallback || DEFAULT_CHAT_ENDPOINTS[safeProvider] || DEFAULT_CHAT_ENDPOINTS.openai;
+  const safeEndpoint = sanitizeEndpoint(endpoint, safeFallback);
+  if (safeProvider === "nvidia" || safeProvider === "nvidia_deepseek") {
+    try {
+      const parsed = new URL(safeEndpoint);
+      if (!/\/chat\/completions\/?$/i.test(parsed.pathname)) {
+        return DEFAULT_CHAT_ENDPOINTS[safeProvider] || DEFAULT_CHAT_ENDPOINTS.nvidia;
+      }
+    } catch (_error) {
+      return DEFAULT_CHAT_ENDPOINTS[safeProvider] || DEFAULT_CHAT_ENDPOINTS.nvidia;
+    }
+  }
+  return safeEndpoint;
 }
 
 function textOnlyMessages(messages) {
@@ -576,7 +619,7 @@ async function proxyChat(req, res) {
   const systemModel = getSystemModel("chat", provider);
   const systemEndpoint = getSystemEndpoint("chat", provider);
   const model = String(isSuperiorLlm ? systemModel : body.model || body.api?.model || systemModel).trim();
-  const endpoint = sanitizeEndpoint(isSuperiorLlm ? systemEndpoint : body.endpoint || body.api?.endpoint, systemEndpoint);
+  const endpoint = resolveChatEndpoint(upstreamProvider, isSuperiorLlm ? systemEndpoint : body.endpoint || body.api?.endpoint, DEFAULT_CHAT_ENDPOINTS[upstreamProvider] || systemEndpoint);
   const messages = Array.isArray(body.messages) ? body.messages : [];
   res.status(200);
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
