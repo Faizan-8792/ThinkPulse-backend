@@ -234,6 +234,401 @@ function getPromoInstanceKey(promo, fallbackValue = Date.now()) {
   return String(createdAt || fallback || updatedAt || Date.now());
 }
 
+function normalizePromoRecord(value, fallbackCode = "") {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const code = sanitizePromoCode(value.code || fallbackCode);
+  if (!code) {
+    return null;
+  }
+  const now = Date.now();
+  const type = normalizePromoType(value.type);
+  const redemptions = (Array.isArray(value.redemptions) ? value.redemptions : [])
+    .map((entry) => {
+      const redeemerEmail = normalizeEmail(entry?.redeemerEmail || entry?.email);
+      const creditedEmail = normalizeEmail(entry?.creditedEmail || entry?.email || redeemerEmail);
+      if (!redeemerEmail && !creditedEmail) {
+        return null;
+      }
+      return {
+        redeemerEmail,
+        creditedEmail,
+        amountPaise: normalizePaise(entry?.amountPaise),
+        createdAt: toEpochMs(entry?.createdAt) || now
+      };
+    })
+    .filter(Boolean)
+    .slice(0, MAX_PROMO_REDEMPTIONS);
+
+  return {
+    code,
+    type,
+    active: normalizeBoolean(value.active, true),
+    assignedToEmail: normalizeEmail(value.assignedToEmail),
+    createdByEmail: normalizeEmail(value.createdByEmail),
+    note: toSafeString(value.note, 220),
+    valuePaise: normalizePaise(value.valuePaise),
+    percent: Math.max(0, Math.min(95, Math.round(Number(value.percent) || 0))),
+    percentBasePaise: normalizePaise(value.percentBasePaise),
+    maxRewardPaise: normalizePaise(value.maxRewardPaise),
+    usageLimit: type === "invite_bonus"
+      ? 1
+      : Math.max(1, Math.min(5000, Math.round(Number(value.usageLimit) || 1))),
+    usedCount: Math.max(0, Math.round(Number(value.usedCount) || redemptions.length)),
+    blockedSelfUse: value.blockedSelfUse !== false,
+    redemptions,
+    createdAt: toEpochMs(value.createdAt) || now,
+    updatedAt: toEpochMs(value.updatedAt) || now,
+    expiresAt: Math.max(0, toEpochMs(value.expiresAt)),
+    latestRedeemerEmail: normalizeEmail(value.latestRedeemerEmail),
+    latestCreditedEmail: normalizeEmail(value.latestCreditedEmail),
+    latestRedemptionAt: Math.max(0, toEpochMs(value.latestRedemptionAt))
+  };
+}
+
+function normalizeStorePayload(value) {
+  const source = value && typeof value === "object" ? value : {};
+  const next = {
+    promos: {},
+    bonusProfiles: {},
+    notifications: [],
+    notificationReceipts: {},
+    rewardEvents: [],
+    updatedAt: Math.max(0, Number(source.updatedAt || Date.now()))
+  };
+
+  for (const [rawCode, promo] of Object.entries(source.promos || {})) {
+    const normalized = normalizePromoRecord(promo, rawCode);
+    if (normalized) {
+      next.promos[normalized.code] = normalized;
+    }
+  }
+  for (const [rawEmail, profile] of Object.entries(source.bonusProfiles || {})) {
+    const email = normalizeEmail(rawEmail);
+    if (!email) {
+      continue;
+    }
+    next.bonusProfiles[email] = {
+      firstSeenAt: toEpochMs(profile?.firstSeenAt) || Date.now(),
+      joiningClaimedAt: Math.max(0, toEpochMs(profile?.joiningClaimedAt)),
+      joiningBonusPaise: normalizePaise(profile?.joiningBonusPaise),
+      updatedAt: toEpochMs(profile?.updatedAt) || Date.now()
+    };
+  }
+  next.notifications = (Array.isArray(source.notifications) ? source.notifications : [])
+    .map((item) => ({
+      id: toSafeString(item?.id, 80) || `notification:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+      email: normalizeEmail(item?.email),
+      kind: toSafeString(item?.kind, 80),
+      title: toSafeString(item?.title, 120),
+      message: toSafeString(item?.message, 360),
+      actionTarget: toSafeString(item?.actionTarget, 80),
+      code: sanitizePromoCode(item?.code),
+      read: normalizeBoolean(item?.read, false),
+      createdAt: toEpochMs(item?.createdAt) || Date.now(),
+      dedupeKey: toSafeString(item?.dedupeKey, 220)
+    }))
+    .filter((item) => item.email)
+    .slice(0, MAX_NOTIFICATIONS);
+  next.rewardEvents = (Array.isArray(source.rewardEvents) ? source.rewardEvents : [])
+    .map((event) => ({
+      id: toSafeString(event?.id, 80) || `reward:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+      kind: toSafeString(event?.kind, 80),
+      email: normalizeEmail(event?.email),
+      actorEmail: normalizeEmail(event?.actorEmail),
+      creditedEmail: normalizeEmail(event?.creditedEmail),
+      code: sanitizePromoCode(event?.code),
+      promoType: toSafeString(event?.promoType, 80),
+      amountPaise: normalizePaise(event?.amountPaise),
+      note: toSafeString(event?.note, 240),
+      createdAt: toEpochMs(event?.createdAt) || Date.now()
+    }))
+    .slice(0, MAX_REWARD_EVENTS);
+  next.notificationReceipts = source.notificationReceipts && typeof source.notificationReceipts === "object"
+    ? source.notificationReceipts
+    : {};
+  return next;
+}
+
+function ensureLoaded() {
+  if (initialized) {
+    return;
+  }
+  initialized = true;
+  try {
+    if (fs.existsSync(rewardsStorePath)) {
+      store = normalizeStorePayload(JSON.parse(fs.readFileSync(rewardsStorePath, "utf8")));
+    } else {
+      store = normalizeStorePayload(store);
+    }
+  } catch (error) {
+    console.warn("[rewards-store] Failed to load rewards store:", error?.message || error);
+    store = normalizeStorePayload(store);
+  }
+}
+
+function persistStore() {
+  store.updatedAt = Date.now();
+  const snapshot = normalizeStorePayload(store);
+  persistQueue = persistQueue
+    .catch(() => undefined)
+    .then(async () => {
+      await fs.promises.mkdir(path.dirname(rewardsStorePath), { recursive: true });
+      await fs.promises.writeFile(rewardsStorePath, JSON.stringify(snapshot, null, 2), "utf8");
+    });
+  return persistQueue;
+}
+
+async function appendRewardEvent(event) {
+  ensureLoaded();
+  const item = {
+    id: toSafeString(event?.id, 80) || `reward:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+    kind: toSafeString(event?.kind, 80),
+    email: normalizeEmail(event?.email),
+    actorEmail: normalizeEmail(event?.actorEmail),
+    creditedEmail: normalizeEmail(event?.creditedEmail),
+    code: sanitizePromoCode(event?.code),
+    promoType: toSafeString(event?.promoType, 80),
+    amountPaise: normalizePaise(event?.amountPaise),
+    note: toSafeString(event?.note, 240),
+    createdAt: toEpochMs(event?.createdAt) || Date.now()
+  };
+  store.rewardEvents.unshift(item);
+  store.rewardEvents = store.rewardEvents.slice(0, MAX_REWARD_EVENTS);
+  await persistStore();
+  return item;
+}
+
+async function appendNotification(notification) {
+  ensureLoaded();
+  const email = normalizeEmail(notification?.email);
+  if (!email) {
+    return null;
+  }
+  const dedupeKey = toSafeString(notification?.dedupeKey, 220);
+  if (dedupeKey && store.notifications.some((item) => item.email === email && item.dedupeKey === dedupeKey)) {
+    return null;
+  }
+  const item = {
+    id: `notification:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+    email,
+    kind: toSafeString(notification?.kind, 80),
+    title: toSafeString(notification?.title, 120),
+    message: toSafeString(notification?.message, 360),
+    actionTarget: toSafeString(notification?.actionTarget, 80),
+    code: sanitizePromoCode(notification?.code),
+    read: false,
+    createdAt: Date.now(),
+    dedupeKey
+  };
+  store.notifications.unshift(item);
+  store.notifications = store.notifications.slice(0, MAX_NOTIFICATIONS);
+  await persistStore();
+  return item;
+}
+
+async function listKnownRewardRecipients() {
+  const recipients = new Set();
+  for (const email of Object.keys(store.bonusProfiles || {})) {
+    const safeEmail = normalizeEmail(email);
+    if (safeEmail) {
+      recipients.add(safeEmail);
+    }
+  }
+  for (const notification of store.notifications || []) {
+    const safeEmail = normalizeEmail(notification?.email);
+    if (safeEmail) {
+      recipients.add(safeEmail);
+    }
+  }
+  try {
+    const known = await listKnownUsersFromPayments(5000);
+    for (const user of known?.users || []) {
+      const safeEmail = normalizeEmail(user?.email || user?.userId || user?.user_id);
+      if (safeEmail) {
+        recipients.add(safeEmail);
+      }
+    }
+  } catch (_error) {
+    return [...recipients];
+  }
+  return [...recipients];
+}
+
+async function listNotifications(email, limit = 30) {
+  ensureLoaded();
+  const safeEmail = normalizeEmail(email);
+  const safeLimit = Math.max(1, Math.min(50, Math.round(Number(limit) || 30)));
+  return store.notifications
+    .filter((item) => item.email === safeEmail)
+    .sort((left, right) => Number(right.createdAt || 0) - Number(left.createdAt || 0))
+    .slice(0, safeLimit);
+}
+
+async function markNotificationRead(email, id) {
+  ensureLoaded();
+  const safeEmail = normalizeEmail(email);
+  const safeId = toSafeString(id, 80);
+  const notification = store.notifications.find((item) => item.email === safeEmail && item.id === safeId);
+  if (!notification) {
+    throw new Error("Notification not found.");
+  }
+  notification.read = true;
+  await persistStore();
+  return notification;
+}
+
+async function getRewardDashboard(email) {
+  ensureLoaded();
+  const safeEmail = normalizeEmail(email);
+  if (!safeEmail) {
+    throw new Error("Valid email is required.");
+  }
+  const resolvedRole = await isAdminEmail(safeEmail) ? "admin" : "user";
+  const billing = await getUserPlanState({ userId: safeEmail }).catch(() => null);
+  const now = Date.now();
+  const bonusProfile = store.bonusProfiles[safeEmail] || {
+    firstSeenAt: now,
+    joiningClaimedAt: 0,
+    joiningBonusPaise: JOINING_BONUS_PAISE,
+    updatedAt: now
+  };
+  store.bonusProfiles[safeEmail] = bonusProfile;
+
+  const promoCodes = Object.values(store.promos)
+    .map((promo) => normalizePromoRecord(promo, promo?.code))
+    .filter(Boolean)
+    .filter((promo) => resolvedRole === "admin" || !promo.assignedToEmail || promo.assignedToEmail === safeEmail)
+    .map((promo) => {
+      const usedByCurrentUser = promo.redemptions.some((entry) => entry.redeemerEmail === safeEmail);
+      const creditedToCurrentUser = promo.redemptions.some((entry) => entry.creditedEmail === safeEmail);
+      const usageLeft = Math.max(0, Number(promo.usageLimit || 1) - Number(promo.usedCount || 0));
+      const expired = Number(promo.expiresAt || 0) > 0 && Number(promo.expiresAt || 0) <= now;
+      const shareable = promo.type === "invite_bonus" && promo.assignedToEmail === safeEmail;
+      const selfBlocked = promo.blockedSelfUse && promo.createdByEmail && promo.createdByEmail === safeEmail;
+      return {
+        code: promo.code,
+        type: promo.type,
+        active: promo.active === true,
+        assignedToEmail: promo.assignedToEmail,
+        createdByEmail: promo.createdByEmail,
+        note: promo.note,
+        rewardPaise: calculatePromoRewardPaise(promo),
+        valuePaise: promo.valuePaise,
+        percent: promo.percent,
+        percentBasePaise: promo.percentBasePaise,
+        maxRewardPaise: promo.maxRewardPaise,
+        usageLimit: promo.usageLimit,
+        usedCount: promo.usedCount,
+        usageLeft,
+        usedByCurrentUser,
+        redeemedByCurrentUser: usedByCurrentUser,
+        creditedToCurrentUser,
+        shareable,
+        blockedSelfUse: promo.blockedSelfUse !== false,
+        expired,
+        canRedeem: resolvedRole !== "admin" && promo.active && !expired && usageLeft > 0 && !usedByCurrentUser && !selfBlocked && !shareable,
+        latestRedeemerEmail: promo.latestRedeemerEmail,
+        latestCreditedEmail: promo.latestCreditedEmail,
+        latestRedemptionAt: promo.latestRedemptionAt,
+        createdAt: promo.createdAt,
+        updatedAt: promo.updatedAt,
+        expiresAt: promo.expiresAt
+      };
+    })
+    .sort((left, right) => {
+      if (left.canRedeem !== right.canRedeem) {
+        return left.canRedeem ? -1 : 1;
+      }
+      return Number(right.updatedAt || 0) - Number(left.updatedAt || 0);
+    });
+  const promoHistory = store.rewardEvents
+    .filter((entry) => entry.email === safeEmail || entry.creditedEmail === safeEmail || entry.actorEmail === safeEmail)
+    .slice(0, 40);
+
+  await persistStore();
+  return {
+    billing,
+    joiningBonus: {
+      eligible: resolvedRole !== "admin" && !Number(bonusProfile.joiningClaimedAt || 0),
+      claimed: Boolean(Number(bonusProfile.joiningClaimedAt || 0)),
+      amountPaise: Math.max(0, Number(bonusProfile.joiningBonusPaise) || JOINING_BONUS_PAISE),
+      claimedAt: Math.max(0, Number(bonusProfile.joiningClaimedAt) || 0)
+    },
+    promoCodes,
+    promoHistory,
+    serverTime: now
+  };
+}
+
+async function claimJoiningBonus(email) {
+  ensureLoaded();
+  const safeEmail = normalizeEmail(email);
+  if (!safeEmail) {
+    throw new Error("Valid email is required.");
+  }
+  if (await isAdminEmail(safeEmail)) {
+    throw new Error("Admin accounts are not eligible for joining bonus.");
+  }
+  const now = Date.now();
+  const current = store.bonusProfiles[safeEmail] || {
+    firstSeenAt: now,
+    joiningClaimedAt: 0,
+    joiningBonusPaise: JOINING_BONUS_PAISE,
+    updatedAt: now
+  };
+  if (Number(current.joiningClaimedAt || 0) > 0) {
+    return {
+      claimed: false,
+      alreadyClaimed: true,
+      amountPaise: Math.max(0, Number(current.joiningBonusPaise) || JOINING_BONUS_PAISE),
+      claimedAt: Number(current.joiningClaimedAt) || 0
+    };
+  }
+
+  const rewardPaise = JOINING_BONUS_PAISE;
+  const credit = await creditWallet({
+    userId: safeEmail,
+    amountInr: rewardPaise / 100,
+    paymentId: `joining_bonus:${safeEmail}`,
+    source: "joining_bonus"
+  });
+  if (!credit?.applied && String(credit?.reason || "") !== "duplicate_payment") {
+    throw new Error("Unable to credit joining bonus.");
+  }
+
+  store.bonusProfiles[safeEmail] = {
+    ...current,
+    joiningClaimedAt: now,
+    joiningBonusPaise: rewardPaise,
+    updatedAt: now
+  };
+  await appendRewardEvent({
+    kind: "joining_bonus",
+    email: safeEmail,
+    creditedEmail: safeEmail,
+    amountPaise: rewardPaise,
+    note: "Joining bonus redeemed",
+    createdAt: now
+  });
+  await appendNotification({
+    email: safeEmail,
+    kind: "joining_bonus",
+    title: "Joining bonus credited",
+    message: "Your joining bonus has been credited to your wallet.",
+    actionTarget: "billing",
+    dedupeKey: `joining-bonus:${safeEmail}`
+  });
+  await persistStore();
+  return {
+    claimed: credit?.applied !== false,
+    alreadyClaimed: false,
+    amountPaise: rewardPaise,
+    claimedAt: now
+  };
+}
+
 /**
  * Creates or updates one promo code.
  * @param {object} input
