@@ -5,7 +5,7 @@ const crypto = require("crypto");
 const SYSTEM_KEY_MARKER = "system-managed";
 const ENCRYPTED_PREFIX = "enc:v1:";
 const LEGACY_OBFUSCATED_PREFIX = "fzn::";
-const PROVIDER_PROXY_VERSION = "superior-deepseek-routing-v5";
+const PROVIDER_PROXY_VERSION = "superior-deepseek-routing-v6";
 const DEFAULT_CHAT_MODELS = {
   openrouter: "openai/gpt-4o-mini",
   gemini: "gemini-2.0-flash",
@@ -354,6 +354,7 @@ function buildProviderProxyDiagnostics() {
   const superiorUpstreamKeyConfigured = superiorUpstreamProvider && superiorUpstreamProvider !== superiorProvider
     ? Boolean(getSystemApiKey("chat", superiorUpstreamProvider))
     : false;
+  const ocrCapabilities = buildSystemApiCapabilities().ocrApis || [];
   return {
     version: PROVIDER_PROXY_VERSION,
     chat: {
@@ -371,6 +372,25 @@ function buildProviderProxyDiagnostics() {
       },
       nvidia_deepseek: {
         keyConfigured: Boolean(getSystemApiKey("chat", "nvidia_deepseek"))
+      }
+    },
+    ocr: {
+      order: ocrCapabilities.map((api) => api.provider),
+      ocrspace: {
+        keyConfigured: Boolean(getSystemApiKey("ocr", "ocrspace")),
+        endpoint: getSystemEndpoint("ocr", "ocrspace")
+      },
+      nvidia: {
+        keyConfigured: Boolean(getSystemApiKey("ocr", "nvidia")),
+        endpoint: getSystemEndpoint("ocr", "nvidia"),
+        model: getSystemModel("ocr", "nvidia")
+      },
+      superior_ocr: {
+        keyConfigured: Boolean(getResolvedSystemApiKey("ocr", "superior_ocr")),
+        directKeyConfigured: Boolean(getSystemApiKey("ocr", "superior_ocr")),
+        upstreamProvider: getSystemProvider("ocr", "superior_ocr"),
+        endpoint: getSystemEndpoint("ocr", "superior_ocr"),
+        model: getSystemModel("ocr", "superior_ocr")
       }
     }
   };
@@ -883,43 +903,101 @@ async function proxyChat(req, res) {
 async function proxyOcr(req, res) {
   const body = req.body && typeof req.body === "object" ? req.body : {};
   const provider = normalizeProvider(body.provider || body.api?.provider || "ocrspace");
-  const upstreamProvider = getSystemProvider("ocr", provider);
-  const key = resolveRequestApiKey(req, "ocr", provider);
+  const keySource = String(body.keySource || body.api?.keySource || "system").trim().toLowerCase();
+  const isSystemManagedRequest = keySource === "system" || keySource === "env";
   const base64Image = String(body.base64Image || body.image || "").trim();
   if (!base64Image) {
     throw new Error("OCR image payload is required.");
   }
-  if (upstreamProvider === "ocrspace") {
-    const form = new FormData();
-    form.append("base64Image", base64Image);
-    form.append("language", String(body.language || "eng"));
-    form.append("isOverlayRequired", "false");
-    const response = await fetch(sanitizeEndpoint(body.endpoint || body.api?.endpoint, getSystemEndpoint("ocr", provider) || DEFAULT_OCR_ENDPOINTS.ocrspace), {
-      method: "POST",
-      headers: { apikey: key },
-      body: form
-    });
-    if (!response.ok) {
-      throw new Error(`OCR.Space ${response.status}`);
+  const candidates = provider === "superior_ocr" || (provider === "nvidia" && isSystemManagedRequest)
+    ? ["ocrspace", "nvidia", "superior_ocr"]
+    : [provider];
+  let lastError = null;
+  for (const candidate of candidates) {
+    const targetProvider = normalizeProvider(candidate);
+    const upstreamProvider = getSystemProvider("ocr", targetProvider);
+    const candidateKey = targetProvider === provider
+      ? resolveRequestApiKey(req, "ocr", targetProvider)
+      : normalizeApiKey(getResolvedSystemApiKey("ocr", targetProvider));
+    if (!candidateKey) {
+      continue;
     }
-    const json = await response.json();
-    const text = String(json?.ParsedResults?.[0]?.ParsedText || "").trim();
-    res.json({ ok: true, text });
-    return;
+    const usesRequestConfig = targetProvider === provider && provider !== "superior_ocr";
+    try {
+      if (upstreamProvider === "ocrspace") {
+        const form = new FormData();
+        form.append("base64Image", base64Image);
+        form.append("language", String(body.language || "eng"));
+        form.append("isOverlayRequired", "false");
+        form.append("OCREngine", String(body.ocrEngine || body.OCREngine || "2"));
+        const response = await fetch(sanitizeEndpoint(
+          usesRequestConfig ? body.endpoint || body.api?.endpoint : "",
+          getSystemEndpoint("ocr", targetProvider) || DEFAULT_OCR_ENDPOINTS.ocrspace
+        ), {
+          method: "POST",
+          headers: { apikey: candidateKey },
+          body: form
+        });
+        if (!response.ok) {
+          const error = new Error(`OCR.Space ${response.status}`);
+          error.status = response.status;
+          throw error;
+        }
+        const json = await response.json();
+        const errorMessage = Array.isArray(json?.ErrorMessage)
+          ? json.ErrorMessage.filter(Boolean).join(" ")
+          : String(json?.ErrorMessage || json?.ErrorDetails || "").trim();
+        if (json?.IsErroredOnProcessing || Number(json?.OCRExitCode || 0) >= 3) {
+          const error = new Error(errorMessage || "OCR.Space failed to process image.");
+          error.status = 422;
+          throw error;
+        }
+        const text = (Array.isArray(json?.ParsedResults) ? json.ParsedResults : [])
+          .map((item) => String(item?.ParsedText || "").trim())
+          .filter(Boolean)
+          .join("\n")
+          .trim();
+        if (!text) {
+          const error = new Error(errorMessage || "OCR.Space returned empty text.");
+          error.status = 422;
+          throw error;
+        }
+        res.json({ ok: true, text });
+        return;
+      }
+      const endpoint = sanitizeEndpoint(
+        usesRequestConfig ? body.endpoint || body.api?.endpoint : "",
+        getSystemEndpoint("ocr", targetProvider) || DEFAULT_OCR_ENDPOINTS.nvidia
+      );
+      const model = String(
+        (usesRequestConfig ? body.model || body.api?.model : "") ||
+        getSystemModel("ocr", targetProvider) ||
+        DEFAULT_OCR_MODELS.nvidia
+      ).trim();
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${candidateKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ model, messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: base64Image } }] }] })
+      });
+      if (!response.ok) {
+        const error = new Error(`NVIDIA OCR ${response.status}`);
+        error.status = response.status;
+        throw error;
+      }
+      const json = await response.json();
+      const text = String(json?.choices?.[0]?.message?.content || json?.data?.[0]?.text || json?.result?.text || json?.text || "").trim();
+      if (!text) {
+        const error = new Error("NVIDIA OCR returned empty text.");
+        error.status = 422;
+        throw error;
+      }
+      res.json({ ok: true, text });
+      return;
+    } catch (error) {
+      lastError = error;
+    }
   }
-  const endpoint = sanitizeEndpoint(body.endpoint || body.api?.endpoint, getSystemEndpoint("ocr", provider) || DEFAULT_OCR_ENDPOINTS.nvidia);
-  const model = String(body.model || body.api?.model || getSystemModel("ocr", provider) || DEFAULT_OCR_MODELS.nvidia).trim();
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ model, messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: base64Image } }] }] })
-  });
-  if (!response.ok) {
-    throw new Error(`NVIDIA OCR ${response.status}`);
-  }
-  const json = await response.json();
-  const text = String(json?.choices?.[0]?.message?.content || json?.data?.[0]?.text || json?.result?.text || json?.text || "").trim();
-  res.json({ ok: true, text });
+  throw lastError || new Error("OCR provider is not configured on the server.");
 }
 
 async function proxyWebSearch(req, res) {
