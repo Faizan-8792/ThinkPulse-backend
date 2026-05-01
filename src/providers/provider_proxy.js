@@ -14,7 +14,7 @@ const DEFAULT_CHAT_MODELS = {
   deepseek: "deepseek-chat",
   nvidia: "meta/llama-3.1-70b-instruct",
   nvidia_deepseek: "deepseek-ai/deepseek-v4-pro",
-  superior_llm: "deepseek-ai/deepseek-v4-pro"
+  superior_llm: "meta/llama-3.1-70b-instruct"
 };
 const DEFAULT_CHAT_ENDPOINTS = {
   openrouter: "https://openrouter.ai/api/v1/chat/completions",
@@ -107,7 +107,7 @@ function getSystemProvider(service, provider) {
       "SUPERIOR_LLM_PROVIDER",
       "SUPERIOR_LLM_UPSTREAM_PROVIDER",
       "SUPERIOR_LLM_TYPE"
-    ]) || "nvidia_deepseek");
+    ]) || "nvidia");
   }
   if (safeService === "ocr" && safeProvider === "superior_ocr") {
     return normalizeProvider(readEnvAny([
