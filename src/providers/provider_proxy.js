@@ -584,6 +584,66 @@ function sendSse(res, payload) {
   res.write(`data: ${JSON.stringify(payload)}\n\n`);
 }
 
+function prepareSseResponse(res) {
+  res.status(200);
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  if (typeof res.flushHeaders === "function") {
+    res.flushHeaders();
+  }
+  sendSse(res, { kind: "retry", content: "" });
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetriableProviderStatus(status) {
+  return status === 502 || status === 503 || status === 504;
+}
+
+async function fetchWithProviderTimeout(endpoint, options, timeoutMs = 120000) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(endpoint, {
+      ...options,
+      signal: controller.signal
+    });
+  } catch (error) {
+    const failure = new Error(error?.name === "AbortError" ? "Upstream provider request timed out." : error?.message || "Upstream provider request failed.");
+    failure.status = error?.name === "AbortError" ? 504 : 502;
+    throw failure;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function fetchProviderResponse(endpoint, options, provider) {
+  const safeProvider = normalizeProvider(provider);
+  const attempts = safeProvider === "nvidia_deepseek" ? 3 : 1;
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const response = await fetchWithProviderTimeout(endpoint, options);
+      if (!isRetriableProviderStatus(response.status) || attempt >= attempts) {
+        return response;
+      }
+      const detail = await response.text().catch(() => "");
+      lastError = new Error(`${safeProvider} ${response.status}${detail ? ` ${detail.slice(0, 240)}` : ""}`);
+      lastError.status = response.status;
+    } catch (error) {
+      lastError = error;
+      if (attempt >= attempts || !isRetriableProviderStatus(Number(error?.status || 502))) {
+        throw error;
+      }
+    }
+    await delay(400 * attempt);
+  }
+  throw lastError || new Error(`${safeProvider} provider request failed.`);
+}
+
 async function streamProviderResponse(response, provider, res) {
   if (!response.ok) {
     const detail = await response.text().catch(() => "");
@@ -594,6 +654,7 @@ async function streamProviderResponse(response, provider, res) {
   if (!response.body) {
     throw new Error(`${provider} stream body missing.`);
   }
+  prepareSseResponse(res);
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -656,13 +717,6 @@ async function proxyChat(req, res) {
   const model = String(isSuperiorLlm ? systemModel : body.model || body.api?.model || systemModel).trim();
   const endpoint = resolveChatEndpoint(upstreamProvider, isSuperiorLlm ? systemEndpoint : body.endpoint || body.api?.endpoint, DEFAULT_CHAT_ENDPOINTS[upstreamProvider] || systemEndpoint);
   const messages = Array.isArray(body.messages) ? body.messages : [];
-  res.status(200);
-  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-  res.setHeader("Cache-Control", "no-cache, no-transform");
-  res.setHeader("Connection", "keep-alive");
-  if (typeof res.flushHeaders === "function") {
-    res.flushHeaders();
-  }
 
   if (upstreamProvider === "gemini") {
     const url = new URL(endpoint || DEFAULT_CHAT_ENDPOINTS.gemini);
@@ -698,7 +752,9 @@ async function proxyChat(req, res) {
   }
 
   const isNvidiaDeepSeek = upstreamProvider === "nvidia_deepseek";
-  const response = await fetch(endpoint || DEFAULT_CHAT_ENDPOINTS[provider] || DEFAULT_CHAT_ENDPOINTS[upstreamProvider] || DEFAULT_CHAT_ENDPOINTS.openai, {
+  const chatEndpoint = endpoint || DEFAULT_CHAT_ENDPOINTS[provider] || DEFAULT_CHAT_ENDPOINTS[upstreamProvider] || DEFAULT_CHAT_ENDPOINTS.openai;
+  const requestMessages = upstreamProvider === "deepseek" || isNvidiaDeepSeek ? textOnlyMessages(messages) : messages;
+  const response = await fetchProviderResponse(chatEndpoint, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${key}`,
@@ -707,7 +763,7 @@ async function proxyChat(req, res) {
     },
     body: JSON.stringify({
       model: model || DEFAULT_CHAT_MODELS[provider] || DEFAULT_CHAT_MODELS.openai,
-      messages: upstreamProvider === "deepseek" ? textOnlyMessages(messages) : messages,
+      messages: requestMessages,
       stream: true,
       max_tokens: isNvidiaDeepSeek ? 16384 : upstreamProvider === "deepseek" ? 2048 : 4096,
       ...(isNvidiaDeepSeek ? {
@@ -718,7 +774,7 @@ async function proxyChat(req, res) {
         }
       } : {})
     })
-  });
+  }, upstreamProvider);
   return streamProviderResponse(response, upstreamProvider, res);
 }
 
