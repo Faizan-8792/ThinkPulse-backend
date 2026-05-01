@@ -553,8 +553,11 @@ async function proxyChat(req, res) {
   const provider = normalizeProvider(body.provider || body.api?.provider || "openai");
   const upstreamProvider = getSystemProvider("chat", provider);
   const key = resolveRequestApiKey(req, "chat", provider);
-  const model = String(body.model || body.api?.model || getSystemModel("chat", provider)).trim();
-  const endpoint = sanitizeEndpoint(body.endpoint || body.api?.endpoint, getSystemEndpoint("chat", provider));
+  const isSuperiorLlm = provider === "superior_llm";
+  const systemModel = getSystemModel("chat", provider);
+  const systemEndpoint = getSystemEndpoint("chat", provider);
+  const model = String(isSuperiorLlm ? systemModel : body.model || body.api?.model || systemModel).trim();
+  const endpoint = sanitizeEndpoint(isSuperiorLlm ? systemEndpoint : body.endpoint || body.api?.endpoint, systemEndpoint);
   const messages = Array.isArray(body.messages) ? body.messages : [];
   res.status(200);
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
