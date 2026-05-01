@@ -40,6 +40,12 @@ const {
   createUserRateLimiter
 } = require("../security/rate_limit");
 const {
+  buildSystemApiCapabilities,
+  handleProviderProxyRequest,
+  protectUserStatePayload,
+  sanitizeSystemServiceConfig
+} = require("../providers/provider_proxy");
+const {
   z,
   validateRequest,
   safeString,
@@ -124,6 +130,28 @@ const premiumApiWriteSchema = z.object({
   premiumApis: premiumApiConfigSchema.optional(),
   config: premiumApiConfigSchema.optional()
 }).passthrough();
+
+function normalizePublicOcrApiEntry(entry, index = 0) {
+  if (!entry || typeof entry !== "object" || entry.enabled === false) {
+    return null;
+  }
+
+  const provider = String(entry.provider || "").trim().toLowerCase().slice(0, 40);
+  const key = String(entry.key || "").trim().slice(0, 500);
+  if (!provider || !key) {
+    return null;
+  }
+
+  return {
+    provider,
+    key,
+    model: String(entry.model || "").trim().slice(0, 200),
+    endpoint: String(entry.endpoint || "").trim().slice(0, 2000),
+    enabled: true,
+    order: Number.isFinite(Number(entry.order)) ? Number(entry.order) : index
+  };
+}
+
 const userStateParamsSchema = z.object({
   namespace: z.enum(["billing", "account", "settings", "userapis", "userocrapi"]),
   email: emailSchema
@@ -173,6 +201,33 @@ function resolvePremiumApiPayload(body) {
   return {};
 }
 
+function mergeSuperiorSystemApis(systemApis, metadataApis, superiorProviders) {
+  const systemList = Array.isArray(systemApis) ? systemApis : [];
+  const metadataList = Array.isArray(metadataApis) ? metadataApis : [];
+  const superiorSet = new Set((superiorProviders || []).map((provider) => String(provider || "").trim().toLowerCase()));
+  const output = [];
+  const seen = new Set();
+  const push = (entry) => {
+    if (!entry || typeof entry !== "object") {
+      return;
+    }
+    const provider = String(entry.provider || "").trim().toLowerCase();
+    const identity = String(entry.id || `${provider}:${entry.endpoint || ""}:${entry.model || ""}`).trim();
+    if (!provider || seen.has(identity)) {
+      return;
+    }
+    seen.add(identity);
+    output.push({
+      ...entry,
+      order: output.length
+    });
+  };
+
+  systemList.filter((entry) => superiorSet.has(String(entry?.provider || "").trim().toLowerCase())).forEach(push);
+  (metadataList.length ? metadataList : systemList).forEach(push);
+  return output;
+}
+
 router.use(authenticateRequest());
 router.use("/config/premium-service-apis", requireRole("premium"));
 router.use("/admin", requireRole("admin"));
@@ -202,6 +257,18 @@ router.use(
   })
 );
 
+router.post(
+  "/proxy/:service",
+  createUserRateLimiter({
+    scope: "provider_proxy",
+    windowMs: 60 * 1000,
+    max: 60,
+    keyResolver: (req) => String(req.user?.email || "").trim().toLowerCase(),
+    message: "Too many AI provider requests. Please slow down."
+  }),
+  handleProviderProxyRequest
+);
+
 router.get("/config/premium-service-apis", async (_req, res) => {
   if (!isSupabaseConfigured()) {
     res.status(503).json({
@@ -213,9 +280,17 @@ router.get("/config/premium-service-apis", async (_req, res) => {
 
   try {
     const stored = await getGlobalJsonConfig(PREMIUM_SERVICE_APIS_SETTING_KEY);
+    const systemCapabilities = buildSystemApiCapabilities();
+    const metadata = sanitizeSystemServiceConfig(stored?.found ? stored.value || {} : {});
     res.json({
       ok: true,
-      premiumApis: stored?.found ? stored.value || {} : {},
+      premiumApis: {
+        ...systemCapabilities,
+        chatApis: mergeSuperiorSystemApis(systemCapabilities.chatApis, metadata.chatApis, ["superior_llm"]),
+        ocrApis: mergeSuperiorSystemApis(systemCapabilities.ocrApis, metadata.ocrApis, ["superior_ocr"]),
+        asrApis: metadata.asrApis.length ? metadata.asrApis : systemCapabilities.asrApis,
+        imageApis: metadata.imageApis.length ? metadata.imageApis : systemCapabilities.imageApis
+      },
       source: stored?.table || "",
       found: Boolean(stored?.found)
     });
@@ -223,6 +298,40 @@ router.get("/config/premium-service-apis", async (_req, res) => {
     res.status(500).json({
       ok: false,
       error: error?.message || "Unable to load premium API settings."
+    });
+  }
+});
+
+router.get("/config/system-api-capabilities", async (_req, res) => {
+  try {
+    res.json({
+      ok: true,
+      capabilities: buildSystemApiCapabilities()
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error?.message || "Unable to load system API capabilities."
+    });
+  }
+});
+
+router.get("/config/shared-ocr-api", async (_req, res) => {
+  try {
+    const capabilities = buildSystemApiCapabilities();
+    const ocrApis = (Array.isArray(capabilities.ocrApis) ? capabilities.ocrApis : [])
+      .filter((api) => String(api?.provider || "").trim().toLowerCase() !== "superior_ocr");
+    res.json({
+      ok: true,
+      ocrApis,
+      ocrApi: ocrApis[0] || null,
+      source: "env",
+      found: Boolean(ocrApis.length)
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error?.message || "Unable to load shared OCR API settings."
     });
   }
 });
@@ -237,7 +346,9 @@ router.post("/admin/config/premium-service-apis", validateRequest({ body: premiu
   }
 
   try {
-    const payload = await validatePremiumServiceConfigEndpoints(resolvePremiumApiPayload(req.body));
+    const payload = sanitizeSystemServiceConfig(
+      await validatePremiumServiceConfigEndpoints(resolvePremiumApiPayload(req.body))
+    );
     const stored = await upsertGlobalJsonConfig(PREMIUM_SERVICE_APIS_SETTING_KEY, payload);
     if (!stored?.stored) {
       throw new Error(stored?.reason || "Premium API settings table is not ready.");
@@ -245,7 +356,7 @@ router.post("/admin/config/premium-service-apis", validateRequest({ body: premiu
 
     res.json({
       ok: true,
-      premiumApis: stored.value || {},
+      premiumApis: sanitizeSystemServiceConfig(stored.value || {}),
       source: stored.table || ""
     });
   } catch (error) {
@@ -327,14 +438,16 @@ router.post("/users/state/:namespace/:email", validateRequest({ params: userStat
   }
 
   try {
+    const rawValue = req.body?.value && typeof req.body.value === "object"
+      ? req.body.value
+      : req.body && typeof req.body === "object"
+        ? req.body
+        : {};
+    const protectedValue = protectUserStatePayload(namespace, email, rawValue);
     const stored = await upsertUserStateConfig(
       namespace,
       email,
-      req.body?.value && typeof req.body.value === "object"
-        ? req.body.value
-        : req.body && typeof req.body === "object"
-          ? req.body
-          : {}
+      protectedValue
     );
 
     res.json({

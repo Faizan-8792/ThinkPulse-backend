@@ -466,7 +466,7 @@ const rawJsonWebhookParser = express.raw({ type: "application/json" });
 app.post("/webhook", rawJsonWebhookParser, razorpayWebhookHandler);
 app.post("/webhooks", rawJsonWebhookParser, razorpayWebhookHandler);
 
-app.use(express.json({ limit: "256kb" }));
+app.use(express.json({ limit: "8mb" }));
 
 app.use("/", usersRouter);
 app.use("/", rewardsRouter);

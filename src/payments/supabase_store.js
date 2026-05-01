@@ -137,7 +137,10 @@ const PAYMENT_CONFIG_USER_ID = "__global_config__";
 
 const USER_STATE_NAMESPACE_ALLOWLIST = new Set([
   "billing",
-  "account"
+  "account",
+  "settings",
+  "userapis",
+  "userocrapi"
 ]);
 
 function parseJsonLikeValue(value) {
