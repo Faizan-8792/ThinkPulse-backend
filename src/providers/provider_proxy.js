@@ -5,7 +5,7 @@ const crypto = require("crypto");
 const SYSTEM_KEY_MARKER = "system-managed";
 const ENCRYPTED_PREFIX = "enc:v1:";
 const LEGACY_OBFUSCATED_PREFIX = "fzn::";
-const PROVIDER_PROXY_VERSION = "superior-deepseek-routing-v3";
+const PROVIDER_PROXY_VERSION = "superior-deepseek-routing-v4";
 const DEFAULT_CHAT_MODELS = {
   openrouter: "openai/gpt-4o-mini",
   gemini: "gemini-2.0-flash",
@@ -842,7 +842,7 @@ async function proxyChat(req, res) {
         } : {})
       })
     }, upstreamProvider);
-    return streamProviderResponse(response, upstreamProvider, res);
+    return await streamProviderResponse(response, upstreamProvider, res);
   } finally {
     if (typeof stopHeartbeat === "function") {
       stopHeartbeat();
