@@ -24,7 +24,7 @@ const {
   deleteWalletSnapshot
 } = require("../payments/wallet_store");
 const {
-  claimJoiningBonus,
+  ensureJoiningBonusAvailableNotification,
   recordAdminWalletCredit
 } = require("../rewards/rewards_store");
 
@@ -111,7 +111,7 @@ function normalizeInrAmount(value) {
   return Math.round(numeric * 100) / 100;
 }
 
-async function creditJoiningBonusForNewUser(email) {
+async function queueJoiningBonusForNewUser(email) {
   const safeEmail = normalizeEmail(email);
   if (!safeEmail) {
     return null;
@@ -125,7 +125,7 @@ async function creditJoiningBonusForNewUser(email) {
     };
   }
 
-  return claimJoiningBonus(safeEmail);
+  return ensureJoiningBonusAvailableNotification(safeEmail);
 }
 
 const premiumApiEntrySchema = z.object({
@@ -594,7 +594,7 @@ router.post("/users/upsert", validateRequest({ body: userUpsertBodySchema }), as
     const isNewBackendUser = !existingPaymentRecord?.found;
     let joiningBonus = null;
     if (isNewBackendUser) {
-      joiningBonus = await creditJoiningBonusForNewUser(email);
+      joiningBonus = await queueJoiningBonusForNewUser(email);
     }
 
     res.json({

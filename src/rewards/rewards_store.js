@@ -326,6 +326,7 @@ function normalizeStorePayload(value) {
       actionTarget: toSafeString(item?.actionTarget, 80),
       code: sanitizePromoCode(item?.code),
       read: normalizeBoolean(item?.read, false),
+      readAt: Math.max(0, toEpochMs(item?.readAt)),
       createdAt: toEpochMs(item?.createdAt) || Date.now(),
       dedupeKey: toSafeString(item?.dedupeKey, 220)
     }))
@@ -419,6 +420,7 @@ async function appendNotification(notification) {
     actionTarget: toSafeString(notification?.actionTarget, 80),
     code: sanitizePromoCode(notification?.code),
     read: false,
+    readAt: 0,
     createdAt: Date.now(),
     dedupeKey
   };
@@ -475,8 +477,65 @@ async function markNotificationRead(email, id) {
     throw new Error("Notification not found.");
   }
   notification.read = true;
+  notification.readAt = Date.now();
   await persistStore();
   return notification;
+}
+
+async function ensureJoiningBonusAvailableNotification(email) {
+  ensureLoaded();
+  const safeEmail = normalizeEmail(email);
+  if (!safeEmail) {
+    throw new Error("Valid email is required.");
+  }
+  if (await isAdminEmail(safeEmail)) {
+    return {
+      available: false,
+      skipped: true,
+      reason: "admin_ineligible"
+    };
+  }
+
+  const now = Date.now();
+  const current = store.bonusProfiles[safeEmail] || {
+    firstSeenAt: now,
+    joiningClaimedAt: 0,
+    joiningBonusPaise: JOINING_BONUS_PAISE,
+    updatedAt: now
+  };
+  store.bonusProfiles[safeEmail] = {
+    ...current,
+    firstSeenAt: Math.max(0, Number(current.firstSeenAt || 0)) || now,
+    joiningBonusPaise: Math.max(0, Number(current.joiningBonusPaise || 0)) || JOINING_BONUS_PAISE,
+    updatedAt: now
+  };
+
+  if (Number(current.joiningClaimedAt || 0) > 0) {
+    await persistStore();
+    return {
+      available: false,
+      alreadyClaimed: true,
+      amountPaise: Math.max(0, Number(current.joiningBonusPaise) || JOINING_BONUS_PAISE),
+      claimedAt: Number(current.joiningClaimedAt) || 0
+    };
+  }
+
+  const notification = await appendNotification({
+    email: safeEmail,
+    kind: "joining_bonus_available",
+    title: "Welcome bonus ready",
+    message: "Tap to open the bonus page and redeem your welcome credit. Wallet stays 0 until you claim it.",
+    actionTarget: "bonus",
+    dedupeKey: `joining-bonus-available:${safeEmail}`
+  });
+  await persistStore();
+  return {
+    available: true,
+    alreadyClaimed: false,
+    amountPaise: Math.max(0, Number(store.bonusProfiles[safeEmail].joiningBonusPaise) || JOINING_BONUS_PAISE),
+    notified: Boolean(notification),
+    notification: notification || null
+  };
 }
 
 async function getRewardDashboard(email) {
@@ -604,6 +663,12 @@ async function claimJoiningBonus(email) {
     joiningBonusPaise: rewardPaise,
     updatedAt: now
   };
+  for (const notification of store.notifications) {
+    if (notification.email === safeEmail && notification.kind === "joining_bonus_available") {
+      notification.read = true;
+      notification.readAt = Math.max(0, Number(notification.readAt || 0)) || now;
+    }
+  }
   await appendRewardEvent({
     kind: "joining_bonus",
     email: safeEmail,
@@ -611,14 +676,6 @@ async function claimJoiningBonus(email) {
     amountPaise: rewardPaise,
     note: "Joining bonus redeemed",
     createdAt: now
-  });
-  await appendNotification({
-    email: safeEmail,
-    kind: "joining_bonus",
-    title: "Joining bonus credited",
-    message: "Your joining bonus has been credited to your wallet.",
-    actionTarget: "billing",
-    dedupeKey: `joining-bonus:${safeEmail}`
   });
   await persistStore();
   return {
@@ -1076,6 +1133,7 @@ async function recordAdminWalletCredit(payload) {
 module.exports = {
   JOINING_BONUS_PAISE,
   getRewardDashboard,
+  ensureJoiningBonusAvailableNotification,
   claimJoiningBonus,
   upsertPromoCode,
   setPromoCodeStatus,
