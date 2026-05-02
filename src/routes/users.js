@@ -6,6 +6,8 @@ const {
   isConfigured: isSupabaseConfigured,
   setUserPlanState,
   getUserPlanState,
+  getUserRegistryRecord,
+  getUserPaymentPresence,
   upsertUserRegistryRecord,
   listKnownUsersFromPayments,
   deleteUserPaymentRecords,
@@ -22,13 +24,15 @@ const {
   deleteWalletSnapshot
 } = require("../payments/wallet_store");
 const {
+  claimJoiningBonus,
   recordAdminWalletCredit
 } = require("../rewards/rewards_store");
 
 const {
   authenticateRequest,
   requireRole,
-  requireSelfOrAdmin
+  requireSelfOrAdmin,
+  resolveTrustedRole
 } = require("../security/auth");
 const {
   createIdempotencyMiddleware
@@ -105,6 +109,23 @@ function normalizeInrAmount(value) {
     return 0;
   }
   return Math.round(numeric * 100) / 100;
+}
+
+async function creditJoiningBonusForNewUser(email) {
+  const safeEmail = normalizeEmail(email);
+  if (!safeEmail) {
+    return null;
+  }
+
+  const role = await resolveTrustedRole(safeEmail);
+  if (role === "admin") {
+    return {
+      skipped: true,
+      reason: "admin_ineligible"
+    };
+  }
+
+  return claimJoiningBonus(safeEmail);
 }
 
 const premiumApiEntrySchema = z.object({
@@ -562,14 +583,25 @@ router.post("/users/upsert", validateRequest({ body: userUpsertBodySchema }), as
   }
 
   try {
+    const existingRegistryRecord = await getUserRegistryRecord(email);
+    const existingPaymentRecord = existingRegistryRecord?.found
+      ? existingRegistryRecord
+      : await getUserPaymentPresence(email);
     const stored = await upsertUserRegistryRecord({
       email,
       createdAt: Date.now()
     });
+    const isNewBackendUser = !existingPaymentRecord?.found;
+    let joiningBonus = null;
+    if (isNewBackendUser) {
+      joiningBonus = await creditJoiningBonusForNewUser(email);
+    }
 
     res.json({
       ok: true,
-      stored
+      stored,
+      isNewBackendUser,
+      joiningBonus
     });
   } catch (error) {
     res.status(500).json({

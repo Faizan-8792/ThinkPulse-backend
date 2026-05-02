@@ -942,6 +942,66 @@ async function upsertUserRegistryRecord(payload) {
   };
 }
 
+async function getUserRegistryRecord(email) {
+  if (!supabaseClient) {
+    return {
+      found: false,
+      reason: "Supabase is not configured."
+    };
+  }
+
+  const safeEmail = normalizeEmailIdentifier(email);
+  if (!safeEmail) {
+    throw new Error("Valid email is required for user registry lookup.");
+  }
+
+  const { data: rows, error } = await supabaseClient
+    .from("payments")
+    .select("id,user_id,amount,status,payment_id,created_at")
+    .eq("payment_id", `user_registry:${safeEmail}`)
+    .limit(1);
+
+  if (error) {
+    throw new Error(error.message || "Unable to fetch user registry row.");
+  }
+
+  const row = Array.isArray(rows) && rows.length ? rows[0] : null;
+  return {
+    found: Boolean(row),
+    row: row || null
+  };
+}
+
+async function getUserPaymentPresence(email) {
+  if (!supabaseClient) {
+    return {
+      found: false,
+      reason: "Supabase is not configured."
+    };
+  }
+
+  const safeEmail = normalizeEmailIdentifier(email);
+  if (!safeEmail) {
+    throw new Error("Valid email is required for user payment lookup.");
+  }
+
+  const { data: rows, error } = await supabaseClient
+    .from("payments")
+    .select("id,user_id,payment_id,created_at")
+    .eq("user_id", safeEmail)
+    .limit(1);
+
+  if (error) {
+    throw new Error(error.message || "Unable to fetch user payment row.");
+  }
+
+  const row = Array.isArray(rows) && rows.length ? rows[0] : null;
+  return {
+    found: Boolean(row),
+    row: row || null
+  };
+}
+
 /**
  * Lists unique known users from payments table by user_id.
  * @param {number=} maxRows
@@ -1074,6 +1134,8 @@ module.exports = {
   markUserAsPaid,
   setUserPlanState,
   getUserPlanState,
+  getUserRegistryRecord,
+  getUserPaymentPresence,
   upsertUserRegistryRecord,
   listKnownUsersFromPayments,
   deleteUserPaymentRecords,

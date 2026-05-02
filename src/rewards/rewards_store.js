@@ -7,7 +7,7 @@ const { getUserPlanState, listKnownUsersFromPayments } = require("../payments/su
 const { creditWallet } = require("../payments/wallet_store");
 const { resolveStorePath } = require("../storage/store_path");
 
-const JOINING_BONUS_PAISE = 1500;
+const JOINING_BONUS_PAISE = 2000;
 const MAX_NOTIFICATIONS = 6000;
 const MAX_REWARD_EVENTS = 6000;
 const MAX_NOTIFICATION_RECEIPTS_PER_EMAIL = 600;
