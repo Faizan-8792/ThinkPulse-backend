@@ -1,16 +1,11 @@
 "use strict";
 
-const ALLOWED_AMOUNTS_INR = Object.freeze([50, 100]);
+const ALLOWED_AMOUNTS_INR = Object.freeze([10, 50, 100, 250, 500, 1000, 10000]);
 const MIN_WALLET_TOPUP_INR = 10;
 const MAX_WALLET_TOPUP_INR = 10000;
 
-const PLAN_BY_AMOUNT = Object.freeze({
-  50: "basic",
-  100: "premium"
-});
-
 /**
- * Returns normalized INR amount when allowed, else null.
+ * Returns normalized integer INR amount for plan purchase amounts, else null.
  * @param {unknown} value
  * @returns {number|null}
  */
@@ -25,7 +20,11 @@ function normalizeAmountInr(value) {
     return null;
   }
 
-  return ALLOWED_AMOUNTS_INR.includes(rounded) ? rounded : null;
+  if (rounded < MIN_WALLET_TOPUP_INR || rounded > MAX_WALLET_TOPUP_INR) {
+    return null;
+  }
+
+  return rounded;
 }
 
 /**
@@ -83,7 +82,7 @@ function resolvePlanByAmount(amountInr) {
   if (!normalized) {
     return null;
   }
-  return PLAN_BY_AMOUNT[normalized] || null;
+  return normalized >= 100 ? "premium" : "basic";
 }
 
 module.exports = {

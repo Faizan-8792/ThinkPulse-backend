@@ -485,7 +485,7 @@ router.post("/create-order", validateRequest({ body: createOrderBodySchema }), a
   if (!amountInr) {
     res.status(400).json({
       ok: false,
-      error: `amount must be one of: ${ALLOWED_AMOUNTS_INR.join(", ")}`
+      error: `amount must be a whole number between ${MIN_WALLET_TOPUP_INR} and ${MAX_WALLET_TOPUP_INR}`
     });
     return;
   }
@@ -558,7 +558,7 @@ router.post("/create-qr", validateRequest({ body: createQrBodySchema }), async (
       error:
         kind === "wallet_topup"
           ? `amount must be a whole number between ${MIN_WALLET_TOPUP_INR} and ${MAX_WALLET_TOPUP_INR}`
-          : `amount must be one of: ${ALLOWED_AMOUNTS_INR.join(", ")}`
+          : `amount must be a whole number between ${MIN_WALLET_TOPUP_INR} and ${MAX_WALLET_TOPUP_INR}`
     });
     return;
   }
@@ -583,7 +583,7 @@ router.post("/create-qr", validateRequest({ body: createQrBodySchema }), async (
     req.body?.description ||
       (kind === "wallet_topup"
         ? `ThinkPulse wallet top-up Rs ${amountInr}`
-        : `ThinkPulse ${amountInr === 100 ? "Premium" : "Basic"} plan Rs ${amountInr}`),
+        : `ThinkPulse ${amountInr >= 100 ? "Premium" : "Basic"} recharge Rs ${amountInr}`),
     180
   );
 
@@ -1143,8 +1143,7 @@ router.post("/verify-payment", validateRequest({ body: verifyPaymentBodySchema }
         ok: false,
         verified: false,
         error:
-          `amount must be one of: ${ALLOWED_AMOUNTS_INR.join(", ")} ` +
-          `or wallet top-up amount between ${MIN_WALLET_TOPUP_INR} and ${MAX_WALLET_TOPUP_INR}`
+          `amount must be a whole number between ${MIN_WALLET_TOPUP_INR} and ${MAX_WALLET_TOPUP_INR}`
       });
       return;
     }
@@ -1566,6 +1565,8 @@ function getIntegrationState() {
     razorpayConfigured: isRazorpayConfigured(),
     supabaseConfigured: isSupabaseConfigured(),
     razorpayKeyId: getPublicKeyId(),
+    minAmountInr: MIN_WALLET_TOPUP_INR,
+    maxAmountInr: MAX_WALLET_TOPUP_INR,
     supportedAmountsInr: [...ALLOWED_AMOUNTS_INR]
   };
 }

@@ -250,7 +250,6 @@ function mergeSuperiorSystemApis(systemApis, metadataApis, superiorProviders) {
 }
 
 router.use(authenticateRequest());
-router.use("/config/premium-service-apis", requireRole("premium"));
 router.use("/admin", requireRole("admin"));
 router.use("/users/state/:namespace/:email", requireSelfOrAdmin([
   { source: "params", key: "email" }
@@ -283,7 +282,7 @@ router.post(
   createUserRateLimiter({
     scope: "provider_proxy",
     windowMs: 60 * 1000,
-    max: 60,
+    max: 300,
     keyResolver: (req) => String(req.user?.email || "").trim().toLowerCase(),
     message: "Too many AI provider requests. Please slow down."
   }),
@@ -292,9 +291,11 @@ router.post(
 
 router.get("/config/premium-service-apis", async (_req, res) => {
   if (!isSupabaseConfigured()) {
-    res.status(503).json({
-      ok: false,
-      error: "Supabase is not configured on the server."
+    res.json({
+      ok: true,
+      premiumApis: buildSystemApiCapabilities(),
+      source: "system",
+      found: false
     });
     return;
   }
@@ -752,7 +753,7 @@ router.post("/admin/users/credit-wallet", validateRequest({ body: adminCreditWal
       userId: email,
       amountInr,
       paymentId,
-      source: note
+      source: `bonus:${note}`
     });
 
     if (credit?.applied) {

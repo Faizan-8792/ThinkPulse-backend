@@ -121,7 +121,7 @@ async function createOrder(payload) {
     throw new Error(
       payload?.allowCustomAmount
         ? "Amount must be a whole number between 10 and 10000 INR."
-        : "Amount must be 50 or 100 INR."
+        : "Amount must be a whole number between 10 and 10000 INR."
     );
   }
 
@@ -160,11 +160,7 @@ async function createSingleUseQr(payload) {
     ? normalizeWalletTopupAmountInr(payload?.amountInr)
     : normalizeAmountInr(payload?.amountInr);
   if (!amountInr) {
-    throw new Error(
-      allowCustomAmount
-        ? "Amount must be a whole number between 10 and 10000 INR."
-        : "Amount must be 50 or 100 INR."
-    );
+    throw new Error("Amount must be a whole number between 10 and 10000 INR.");
   }
 
   const userId = toSafeNote(payload?.userId);
@@ -208,11 +204,7 @@ async function createPaymentLink(payload) {
     ? normalizeWalletTopupAmountInr(payload?.amountInr)
     : normalizeAmountInr(payload?.amountInr);
   if (!amountInr) {
-    throw new Error(
-      allowCustomAmount
-        ? "Amount must be a whole number between 10 and 10000 INR."
-        : "Amount must be 50 or 100 INR."
-    );
+    throw new Error("Amount must be a whole number between 10 and 10000 INR.");
   }
 
   const userId = toSafeNote(payload?.userId);
