@@ -383,8 +383,15 @@ function persistStore() {
 
 async function appendRewardEvent(event) {
   ensureLoaded();
+  const stableId = toSafeString(event?.id, 80);
+  if (stableId) {
+    const existing = store.rewardEvents.find((item) => item.id === stableId);
+    if (existing) {
+      return existing;
+    }
+  }
   const item = {
-    id: toSafeString(event?.id, 80) || `reward:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+    id: stableId || `reward:${Date.now()}:${Math.random().toString(36).slice(2)}`,
     kind: toSafeString(event?.kind, 80),
     email: normalizeEmail(event?.email),
     actorEmail: normalizeEmail(event?.actorEmail),
@@ -670,6 +677,7 @@ async function claimJoiningBonus(email) {
     }
   }
   await appendRewardEvent({
+    id: `joining_bonus:${safeEmail}`,
     kind: "joining_bonus",
     email: safeEmail,
     creditedEmail: safeEmail,
