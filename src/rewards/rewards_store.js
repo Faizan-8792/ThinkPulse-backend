@@ -1196,8 +1196,11 @@ async function recordAdminWalletCredit(payload) {
     return;
   }
 
-  const note = toSafeString(payload?.note, 120) || "Wallet bonus added";
   const actorEmail = normalizeEmail(payload?.actorEmail);
+  const note = toSafeString(
+    payload?.note || `Wallet credited by admin ${actorEmail || "admin"}`,
+    120
+  ) || `Wallet credited by admin ${actorEmail || "admin"}`;
 
   await appendRewardEvent({
     kind: "admin_wallet_credit",
@@ -1214,7 +1217,8 @@ async function recordAdminWalletCredit(payload) {
       kind: "wallet_credit",
       title: "Wallet bonus added",
       message: `${note} has been credited to your wallet.`,
-      actionTarget: "billing"
+      actionTarget: "billing",
+      dedupeKey: `wallet-credit:${email}:${amountPaise}:${note}`
     });
   }
 }

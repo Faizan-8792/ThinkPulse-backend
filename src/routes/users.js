@@ -899,9 +899,12 @@ router.get("/users/status/:email", validateRequest({ params: userPlanParamsSchem
 
 router.post("/admin/users/credit-wallet", validateRequest({ body: adminCreditWalletBodySchema }), async (req, res) => {
   const email = normalizeEmail(req.body?.email || req.body?.userId || req.body?.user_id);
-  const amountInr = normalizeInrAmount(req.body?.amountInr || req.body?.amount);
-  const note = String(req.body?.note || "admin_wallet_credit").trim().slice(0, 80) || "admin_wallet_credit";
   const actorEmail = normalizeEmail(req.user?.email || req.body?.actorEmail);
+  const amountInr = normalizeInrAmount(req.body?.amountInr || req.body?.amount);
+  const note = String(
+    req.body?.note ||
+    `Wallet credited by admin ${actorEmail || "admin"}`
+  ).trim().slice(0, 80) || `Wallet credited by admin ${actorEmail || "admin"}`;
 
   if (!email) {
     res.status(400).json({
