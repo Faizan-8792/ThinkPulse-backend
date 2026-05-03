@@ -44,7 +44,9 @@ const app = express();
 const port = Number(process.env.PORT || 8080);
 const globalIpRateLimiter = createGlobalIpRateLimiter();
 
-const mode = String(process.env.MODE || "test").trim().toLowerCase() === "live" ? "live" : "test";
+const nodeEnv = String(process.env.NODE_ENV || "development").trim().toLowerCase();
+const requestedMode = String(process.env.MODE || "").trim().toLowerCase();
+const mode = requestedMode === "live" || (!requestedMode && nodeEnv === "production") ? "live" : "test";
 const stripeSecretKey = mode === "live"
   ? String(process.env.STRIPE_LIVE_SECRET_KEY || "").trim()
   : String(process.env.STRIPE_TEST_SECRET_KEY || "").trim();
@@ -132,6 +134,20 @@ function isHttpUrl(value) {
   }
 }
 
+function resolveOrigin(value) {
+  if (!isHttpUrl(value)) {
+    return "";
+  }
+
+  try {
+    return new URL(value).origin;
+  } catch (_error) {
+    return "";
+  }
+}
+
+const publicBaseOrigin = resolveOrigin(publicBaseUrl);
+
 const envBootstrapConfig = {
   adminPool: {
     openrouter: parseEnvList("ADMIN_OPENROUTER_KEYS", 30),
@@ -196,7 +212,6 @@ const corsOrigins = String(process.env.CORS_ORIGINS || "")
 function validateRuntimeConfig() {
   const errors = [];
   const warnings = [];
-  const nodeEnv = String(process.env.NODE_ENV || "development").trim().toLowerCase();
 
   const razorpayKeyId = readEnv("RAZORPAY_KEY_ID", "");
   const razorpayKeySecret = readEnv("RAZORPAY_KEY_SECRET", "");
@@ -209,8 +224,20 @@ function validateRuntimeConfig() {
     errors.push("Razorpay configuration is partial. Set RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET, and RAZORPAY_WEBHOOK_SECRET together.");
   }
 
+  if (requestedMode && requestedMode !== "test" && requestedMode !== "live") {
+    warnings.push("MODE should be either test or live. Unknown values fall back to test outside production.");
+  }
+
+  if (nodeEnv === "production" && mode !== "live") {
+    errors.push("Production deployments must run with MODE=live or leave MODE unset.");
+  }
+
   if (publicBaseUrl && !isHttpUrl(publicBaseUrl)) {
     errors.push("PUBLIC_BASE_URL must be a valid http/https URL.");
+  }
+
+  if (nodeEnv === "production" && !publicBaseOrigin) {
+    warnings.push("PUBLIC_BASE_URL is not configured. Legal/payment URLs may be incomplete.");
   }
 
   if (urls.razorpayWebhook) {
@@ -225,7 +252,7 @@ function validateRuntimeConfig() {
   }
 
   if (nodeEnv === "production" && corsOrigins.length === 0) {
-    warnings.push("CORS_ORIGINS is empty in production. This allows broad cross-origin access.");
+    warnings.push("CORS_ORIGINS is empty in production. Browser web origins will be limited to PUBLIC_BASE_URL and Chrome extension origins.");
   }
 
   return {
@@ -242,6 +269,9 @@ for (const warning of runtimeConfigValidation.warnings) {
 for (const error of runtimeConfigValidation.errors) {
   console.error("[config-error]", error);
 }
+if (nodeEnv === "production" && runtimeConfigValidation.errors.length > 0) {
+  throw new Error("Production configuration is invalid. Fix config errors before starting the backend.");
+}
 
 app.disable("x-powered-by");
 app.use(helmet({
@@ -253,7 +283,10 @@ app.use(cors({
   origin(origin, callback) {
     const safeOrigin = String(origin || "").trim();
     const isChromeExtension = safeOrigin.startsWith("chrome-extension://");
-    if (!safeOrigin || corsOrigins.length === 0 || corsOrigins.includes(safeOrigin) || isChromeExtension) {
+    const isConfiguredOrigin = corsOrigins.includes(safeOrigin);
+    const isPublicOrigin = Boolean(publicBaseOrigin && safeOrigin === publicBaseOrigin);
+    const isOpenDevCors = nodeEnv !== "production" && corsOrigins.length === 0;
+    if (!safeOrigin || isConfiguredOrigin || isPublicOrigin || isChromeExtension || isOpenDevCors) {
       callback(null, true);
       return;
     }
