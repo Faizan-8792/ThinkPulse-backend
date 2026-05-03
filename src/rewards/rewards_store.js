@@ -685,6 +685,14 @@ async function claimJoiningBonus(email) {
     note: "Joining bonus redeemed",
     createdAt: now
   });
+  await appendNotification({
+    email: safeEmail,
+    kind: "joining_bonus_claimed",
+    title: "Welcome bonus credited",
+    message: `Rs ${(rewardPaise / 100).toFixed(2)} welcome bonus credited to your wallet.`,
+    actionTarget: "bonus",
+    dedupeKey: `joining-bonus-claimed:${safeEmail}`
+  });
   await persistStore();
   return {
     claimed: credit?.applied !== false,
