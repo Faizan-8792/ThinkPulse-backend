@@ -25,7 +25,8 @@ const {
 } = require("../payments/wallet_store");
 const {
   ensureJoiningBonusAvailableNotification,
-  recordAdminWalletCredit
+  recordAdminWalletCredit,
+  deleteRewardRecordsForEmail
 } = require("../rewards/rewards_store");
 
 const {
@@ -66,6 +67,7 @@ const USER_STATE_NAMESPACES = new Set([
   "userapis",
   "userocrapi"
 ]);
+const USER_ACCOUNT_STATUS_SETTING_PREFIX = "user_account_status:";
 
 /**
  * Converts unknown value to normalized email-like identifier.
@@ -96,6 +98,109 @@ function normalizePlan(value) {
 function normalizeStateNamespace(value) {
   const safe = String(value || "").trim().toLowerCase();
   return USER_STATE_NAMESPACES.has(safe) ? safe : "";
+}
+
+function normalizeAccountStatus(value) {
+  const safe = String(value || "").trim().toLowerCase();
+  if (safe === "blocked" || safe === "deleted") {
+    return safe;
+  }
+  return "active";
+}
+
+function buildUserAccountStatusKey(email) {
+  const safeEmail = normalizeEmail(email);
+  return safeEmail ? `${USER_ACCOUNT_STATUS_SETTING_PREFIX}${safeEmail}` : "";
+}
+
+function normalizeAccountStatusRecord(email, value = null) {
+  const source = value && typeof value === "object" ? value : {};
+  const status = normalizeAccountStatus(source.status);
+  return {
+    email: normalizeEmail(email),
+    status,
+    blocked: status === "blocked",
+    deleted: status === "deleted",
+    blockedAt: Math.max(0, Number(source.blockedAt) || 0),
+    blockedByEmail: normalizeEmail(source.blockedByEmail || ""),
+    deletedAt: Math.max(0, Number(source.deletedAt) || 0),
+    deletedByEmail: normalizeEmail(source.deletedByEmail || ""),
+    lastDeletedAt: Math.max(0, Number(source.lastDeletedAt || source.deletedAt) || 0),
+    note: String(source.note || "").trim().slice(0, 220),
+    updatedAt: Math.max(0, Number(source.updatedAt) || 0)
+  };
+}
+
+async function getUserAccountStatus(email) {
+  const safeEmail = normalizeEmail(email);
+  const key = buildUserAccountStatusKey(safeEmail);
+  if (!safeEmail || !key || !isSupabaseConfigured()) {
+    return {
+      found: false,
+      status: normalizeAccountStatusRecord(safeEmail)
+    };
+  }
+
+  const stored = await getGlobalJsonConfig(key);
+  return {
+    found: Boolean(stored?.found),
+    source: stored?.table || "",
+    status: normalizeAccountStatusRecord(safeEmail, stored?.found ? stored.value || {} : null)
+  };
+}
+
+async function saveUserAccountStatus(email, patch = {}) {
+  const safeEmail = normalizeEmail(email);
+  const key = buildUserAccountStatusKey(safeEmail);
+  if (!safeEmail || !key || !isSupabaseConfigured()) {
+    return {
+      stored: false,
+      status: normalizeAccountStatusRecord(safeEmail, patch),
+      reason: "Supabase is not configured."
+    };
+  }
+
+  const previous = await getUserAccountStatus(safeEmail).catch(() => null);
+  const status = normalizeAccountStatus(patch.status);
+  const now = Date.now();
+  const record = normalizeAccountStatusRecord(safeEmail, {
+    ...(previous?.status || {}),
+    ...patch,
+    status,
+    blockedAt: status === "blocked"
+      ? Math.max(0, Number(patch.blockedAt) || now)
+      : 0,
+    blockedByEmail: status === "blocked" ? patch.blockedByEmail : "",
+    deletedAt: status === "deleted"
+      ? Math.max(0, Number(patch.deletedAt) || now)
+      : 0,
+    deletedByEmail: status === "deleted" ? patch.deletedByEmail : "",
+    lastDeletedAt: status === "deleted"
+      ? Math.max(0, Number(patch.deletedAt) || now)
+      : Math.max(0, Number(patch.lastDeletedAt || previous?.status?.lastDeletedAt) || 0),
+    updatedAt: now
+  });
+  const stored = await upsertGlobalJsonConfig(key, record);
+  return {
+    ...stored,
+    status: record
+  };
+}
+
+async function deleteAllUserStateConfigs(email) {
+  const safeEmail = normalizeEmail(email);
+  const results = {};
+  if (!safeEmail || !isSupabaseConfigured()) {
+    return results;
+  }
+
+  for (const namespace of USER_STATE_NAMESPACES) {
+    results[namespace] = await deleteUserStateConfig(namespace, safeEmail).catch((error) => ({
+      deleted: false,
+      reason: error?.message || "Unable to delete user state."
+    }));
+  }
+  return results;
 }
 
 /**
@@ -211,6 +316,13 @@ const adminDeleteBodySchema = z.object({
   userId: emailSchema.optional(),
   user_id: emailSchema.optional()
 }).passthrough();
+const adminBlockBodySchema = z.object({
+  email: emailSchema.optional(),
+  userId: emailSchema.optional(),
+  user_id: emailSchema.optional(),
+  blocked: z.boolean().optional(),
+  note: optionalSafeString(220)
+}).passthrough();
 
 function resolvePremiumApiPayload(body) {
   if (body?.premiumApis && typeof body.premiumApis === "object") {
@@ -260,6 +372,9 @@ router.use("/users/upsert", requireSelfOrAdmin([
   { source: "body", key: "user_id" }
 ]));
 router.use("/users/plan/:email", requireSelfOrAdmin([
+  { source: "params", key: "email" }
+]));
+router.use("/users/status/:email", requireSelfOrAdmin([
   { source: "params", key: "email" }
 ]));
 router.use(
@@ -584,6 +699,29 @@ router.post("/users/upsert", validateRequest({ body: userUpsertBodySchema }), as
   }
 
   try {
+    const statusState = await getUserAccountStatus(email);
+    const incomingAccountStatus = statusState.status;
+    if (incomingAccountStatus.blocked) {
+      res.status(403).json({
+        ok: false,
+        error: incomingAccountStatus.note || "Your account is blocked. Please contact admin support.",
+        accountStatus: incomingAccountStatus
+      });
+      return;
+    }
+    if (incomingAccountStatus.deleted) {
+      await deleteWalletSnapshot(email).catch(() => undefined);
+      if (isSupabaseConfigured()) {
+        await deleteUserPaymentRecords({ userId: email }).catch(() => undefined);
+        await setUserPlanState({
+          userId: email,
+          plan: "free"
+        }).catch(() => undefined);
+      }
+      await deleteAllUserStateConfigs(email).catch(() => undefined);
+      await deleteRewardRecordsForEmail(email).catch(() => undefined);
+    }
+
     const existingRegistryRecord = await getUserRegistryRecord(email);
     const existingPaymentRecord = existingRegistryRecord?.found
       ? existingRegistryRecord
@@ -592,17 +730,24 @@ router.post("/users/upsert", validateRequest({ body: userUpsertBodySchema }), as
       email,
       createdAt: Date.now()
     });
-    const isNewBackendUser = !existingPaymentRecord?.found;
+    const isNewBackendUser = incomingAccountStatus.deleted || !existingPaymentRecord?.found;
     let joiningBonus = null;
     if (isNewBackendUser) {
       joiningBonus = await queueJoiningBonusForNewUser(email);
     }
+    const activatedStatus = await saveUserAccountStatus(email, {
+      status: "active",
+      lastDeletedAt: incomingAccountStatus.lastDeletedAt,
+      note: ""
+    }).catch(() => null);
 
     res.json({
       ok: true,
       stored,
       isNewBackendUser,
-      joiningBonus
+      joiningBonus,
+      accountStatus: incomingAccountStatus,
+      activeAccountStatus: activatedStatus?.status || null
     });
   } catch (error) {
     res.status(500).json({
@@ -725,6 +870,33 @@ router.get("/users/plan/:email", validateRequest({ params: userPlanParamsSchema 
   }
 });
 
+router.get("/users/status/:email", validateRequest({ params: userPlanParamsSchema }), async (req, res) => {
+  const email = normalizeEmail(req.params?.email);
+  if (!email) {
+    res.status(400).json({
+      ok: false,
+      error: "Valid email is required."
+    });
+    return;
+  }
+
+  try {
+    const statusState = await getUserAccountStatus(email);
+    res.json({
+      ok: true,
+      email,
+      found: Boolean(statusState?.found),
+      accountStatus: statusState.status,
+      source: statusState?.source || ""
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error?.message || "Unable to fetch user account status."
+    });
+  }
+});
+
 router.post("/admin/users/credit-wallet", validateRequest({ body: adminCreditWalletBodySchema }), async (req, res) => {
   const email = normalizeEmail(req.body?.email || req.body?.userId || req.body?.user_id);
   const amountInr = normalizeInrAmount(req.body?.amountInr || req.body?.amount);
@@ -780,6 +952,56 @@ router.post("/admin/users/credit-wallet", validateRequest({ body: adminCreditWal
   }
 });
 
+router.post("/admin/users/block", validateRequest({ body: adminBlockBodySchema }), async (req, res) => {
+  const email = normalizeEmail(req.body?.email || req.body?.userId || req.body?.user_id);
+  const actorEmail = normalizeEmail(req.user?.email || "");
+  const blocked = Boolean(req.body?.blocked);
+  const note = String(
+    req.body?.note ||
+    (blocked ? `Blocked by ${actorEmail || "admin"}` : `Unblocked by ${actorEmail || "admin"}`)
+  ).trim().slice(0, 220);
+
+  if (!email) {
+    res.status(400).json({
+      ok: false,
+      error: "Valid email is required."
+    });
+    return;
+  }
+
+  try {
+    const role = await resolveTrustedRole(email);
+    if (role === "admin") {
+      res.status(400).json({
+        ok: false,
+        error: "Admin accounts cannot be blocked."
+      });
+      return;
+    }
+
+    const previous = await getUserAccountStatus(email).catch(() => null);
+    const stored = await saveUserAccountStatus(email, {
+      status: blocked ? "blocked" : "active",
+      blockedByEmail: blocked ? actorEmail : "",
+      note: blocked ? note : "",
+      lastDeletedAt: previous?.status?.lastDeletedAt || 0
+    });
+
+    res.json({
+      ok: true,
+      email,
+      blocked,
+      accountStatus: stored.status,
+      source: stored.table || ""
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error?.message || "Unable to update user access."
+    });
+  }
+});
+
 router.post("/admin/users/delete", validateRequest({ body: adminDeleteBodySchema }), async (req, res) => {
   const email = normalizeEmail(req.body?.email || req.body?.userId || req.body?.user_id);
   if (!email) {
@@ -791,6 +1013,15 @@ router.post("/admin/users/delete", validateRequest({ body: adminDeleteBodySchema
   }
 
   try {
+    const role = await resolveTrustedRole(email);
+    if (role === "admin") {
+      res.status(400).json({
+        ok: false,
+        error: "Admin accounts cannot be deleted."
+      });
+      return;
+    }
+
     const wallet = await deleteWalletSnapshot(email);
     let payments = {
       deleted: false,
@@ -809,13 +1040,31 @@ router.post("/admin/users/delete", validateRequest({ body: adminDeleteBodySchema
         plan: "free"
       });
     }
+    const userState = await deleteAllUserStateConfigs(email);
+    const rewards = await deleteRewardRecordsForEmail(email).catch((error) => ({
+      ok: false,
+      error: error?.message || "Unable to delete reward records."
+    }));
+    const deletedAt = Date.now();
+    const accountStatus = await saveUserAccountStatus(email, {
+      status: "deleted",
+      deletedAt,
+      deletedByEmail: normalizeEmail(req.user?.email || ""),
+      note: "Deleted by admin"
+    }).catch(() => null);
 
     res.json({
       ok: true,
       email,
       wallet,
       payments,
-      planReset
+      planReset,
+      userState,
+      rewards,
+      accountStatus: accountStatus?.status || normalizeAccountStatusRecord(email, {
+        status: "deleted",
+        deletedAt
+      })
     });
   } catch (error) {
     res.status(500).json({

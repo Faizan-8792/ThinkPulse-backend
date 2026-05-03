@@ -886,6 +886,79 @@ async function clearAllPromoCodes() {
   };
 }
 
+async function deleteRewardRecordsForEmail(email) {
+  ensureLoaded();
+  const safeEmail = normalizeEmail(email);
+  if (!safeEmail) {
+    return {
+      ok: false,
+      email: "",
+      removedPromos: 0,
+      removedNotifications: 0,
+      removedRewardEvents: 0,
+      removedBonusProfile: false
+    };
+  }
+
+  const hadBonusProfile = Boolean(store.bonusProfiles?.[safeEmail]);
+  delete store.bonusProfiles[safeEmail];
+
+  const originalPromoCodes = Object.keys(store.promos || {});
+  for (const code of originalPromoCodes) {
+    const promo = store.promos[code];
+    const assignedToEmail = normalizeEmail(promo?.assignedToEmail);
+    const createdByEmail = normalizeEmail(promo?.createdByEmail);
+    const latestRedeemerEmail = normalizeEmail(promo?.latestRedeemerEmail);
+    const latestCreditedEmail = normalizeEmail(promo?.latestCreditedEmail);
+    const redemptions = Array.isArray(promo?.redemptions) ? promo.redemptions : [];
+    const hasRedemption = redemptions.some((entry) => {
+      const redeemerEmail = normalizeEmail(entry?.redeemerEmail || entry?.email);
+      const creditedEmail = normalizeEmail(entry?.creditedEmail || entry?.email || redeemerEmail);
+      return redeemerEmail === safeEmail || creditedEmail === safeEmail;
+    });
+    if (
+      assignedToEmail === safeEmail ||
+      createdByEmail === safeEmail ||
+      latestRedeemerEmail === safeEmail ||
+      latestCreditedEmail === safeEmail ||
+      hasRedemption
+    ) {
+      delete store.promos[code];
+    }
+  }
+
+  const beforeNotifications = Array.isArray(store.notifications) ? store.notifications.length : 0;
+  store.notifications = (Array.isArray(store.notifications) ? store.notifications : []).filter(
+    (item) => normalizeEmail(item?.email) !== safeEmail
+  );
+
+  const beforeRewardEvents = Array.isArray(store.rewardEvents) ? store.rewardEvents.length : 0;
+  store.rewardEvents = (Array.isArray(store.rewardEvents) ? store.rewardEvents : []).filter((event) => {
+    const emails = [
+      normalizeEmail(event?.email),
+      normalizeEmail(event?.actorEmail),
+      normalizeEmail(event?.creditedEmail)
+    ];
+    return !emails.includes(safeEmail);
+  });
+
+  if (store.notificationReceipts && typeof store.notificationReceipts === "object") {
+    delete store.notificationReceipts[safeEmail];
+  }
+
+  store.updatedAt = Date.now();
+  await persistStore();
+
+  return {
+    ok: true,
+    email: safeEmail,
+    removedPromos: originalPromoCodes.length - Object.keys(store.promos || {}).length,
+    removedNotifications: beforeNotifications - store.notifications.length,
+    removedRewardEvents: beforeRewardEvents - store.rewardEvents.length,
+    removedBonusProfile: hadBonusProfile
+  };
+}
+
 /**
  * Returns admin-friendly promo list.
  * @returns {Promise<Array<object>>}
@@ -1142,5 +1215,6 @@ module.exports = {
   redeemPromoCode,
   listNotifications,
   markNotificationRead,
-  recordAdminWalletCredit
+  recordAdminWalletCredit,
+  deleteRewardRecordsForEmail
 };
