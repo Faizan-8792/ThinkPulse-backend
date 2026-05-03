@@ -589,6 +589,35 @@ function resolveRequestApiKey(req, service, provider) {
   return normalizeApiKey(key);
 }
 
+function buildProviderProxyForbiddenError(message) {
+  const error = new Error(message || "Provider proxy access is not allowed.");
+  error.status = 403;
+  error.source = "provider_proxy_auth";
+  return error;
+}
+
+function isSystemManagedProxyRequest(req) {
+  const body = req.body && typeof req.body === "object" ? req.body : {};
+  const keySource = String(body.keySource || body.api?.keySource || "system").trim().toLowerCase();
+  return keySource === "system" || keySource === "env";
+}
+
+function assertProviderProxyAccess(req) {
+  if (!isSystemManagedProxyRequest(req)) {
+    return;
+  }
+
+  const role = String(req.user?.role || "").trim().toLowerCase();
+  if (role === "admin" || role === "premium") {
+    return;
+  }
+
+  const extensionId = String(req.headers["x-thinkpulse-extension-id"] || "").trim();
+  if (!extensionId) {
+    throw buildProviderProxyForbiddenError("Extension runtime authorization required for managed provider proxy.");
+  }
+}
+
 function defaultNamespaceForService(service) {
   if (service === "ocr") {
     return "userocrapi";
@@ -1082,6 +1111,7 @@ async function proxyAsr(req, res) {
 
 async function handleProviderProxyRequest(req, res) {
   try {
+    assertProviderProxyAccess(req);
     const service = normalizeService(req.params?.service || req.body?.service || "");
     if (service === "chat") {
       await proxyChat(req, res);

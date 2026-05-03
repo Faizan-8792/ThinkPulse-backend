@@ -1,6 +1,7 @@
 "use strict";
 
 const {
+  getGlobalJsonConfig,
   getUserPlanState
 } = require("../payments/supabase_store");
 const {
@@ -11,6 +12,7 @@ const {
 } = require("./logger");
 
 const GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo";
+const USER_ACCOUNT_STATUS_SETTING_PREFIX = "user_account_status:";
 const DEFAULT_ADMIN_EMAILS = [
   "saifullahfaizan786@gmail.com",
   "saifullahfaizan.23@nshm.edu.in"
@@ -75,6 +77,45 @@ function roleRank(value) {
     return 2;
   }
   return 1;
+}
+
+function normalizeAccountStatusRecord(email, value = null) {
+  const source = value && typeof value === "object" ? value : {};
+  const status = String(source.status || "").trim().toLowerCase();
+  const normalizedStatus = status === "blocked" || status === "deleted" ? status : "active";
+  return {
+    email: normalizeEmail(email),
+    status: normalizedStatus,
+    blocked: normalizedStatus === "blocked",
+    deleted: normalizedStatus === "deleted",
+    note: String(source.note || "").trim().slice(0, 220)
+  };
+}
+
+async function getAccountStatusForAuth(email) {
+  const safeEmail = normalizeEmail(email);
+  if (!safeEmail) {
+    return normalizeAccountStatusRecord("");
+  }
+
+  try {
+    const stored = await getGlobalJsonConfig(`${USER_ACCOUNT_STATUS_SETTING_PREFIX}${safeEmail}`);
+    return normalizeAccountStatusRecord(safeEmail, stored?.found ? stored.value : null);
+  } catch (_error) {
+    return normalizeAccountStatusRecord(safeEmail);
+  }
+}
+
+function isAccountStatusBypassPath(req) {
+  const method = String(req.method || "").trim().toUpperCase();
+  const path = String(req.path || req.originalUrl || req.url || "").trim().toLowerCase();
+  if (method === "GET" && /^\/users\/status\/[^/]+$/.test(path)) {
+    return true;
+  }
+  if (method === "POST" && path === "/users/upsert") {
+    return true;
+  }
+  return false;
 }
 
 async function resolveTrustedRole(email) {
@@ -188,6 +229,18 @@ function authenticateRequest() {
 
       req.user = user;
       req.authToken = token;
+      if (user.role !== "admin" && !isAccountStatusBypassPath(req)) {
+        const accountStatus = await getAccountStatusForAuth(user.email);
+        if (accountStatus.blocked || accountStatus.deleted) {
+          rejectAuthRequest(
+            req,
+            res,
+            accountStatus.deleted ? "account_deleted" : "account_blocked",
+            403
+          );
+          return;
+        }
+      }
       next();
     } catch (error) {
       rejectAuthRequest(req, res, error?.message || "token_validation_failed", 401);
