@@ -64,6 +64,27 @@ const {
 } = require("../security/validation");
 
 const router = express.Router();
+const PENDING_PAYMENT_PERSIST_TIMEOUT_MS = 1500;
+
+function withTimeout(promise, timeoutMs) {
+  const safeTimeout = Math.max(100, Number(timeoutMs) || 1000);
+  let timeoutId = null;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timeoutId = setTimeout(() => {
+        const error = new Error("Operation timed out.");
+        error.statusCode = 504;
+        error.code = "ETIMEDOUT";
+        reject(error);
+      }, safeTimeout);
+    })
+  ]).finally(() => {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  });
+}
 
 /**
  * Converts unknown value to a safe short string.
@@ -667,13 +688,13 @@ router.post("/create-qr", validateRequest({ body: createQrBodySchema }), async (
     let pendingPersistence = null;
     if (pendingPaymentId && safeAmountInr > 0) {
       try {
-        pendingPersistence = await upsertPaymentRecord({
+        pendingPersistence = await withTimeout(upsertPaymentRecord({
           userId,
           paymentId: pendingPaymentId,
           status: "pending",
           amountInr: safeAmountInr,
           createdAt: createdAtSec > 0 ? createdAtSec : Date.now()
-        });
+        }), PENDING_PAYMENT_PERSIST_TIMEOUT_MS);
       } catch (error) {
         pendingPersistence = {
           stored: false,

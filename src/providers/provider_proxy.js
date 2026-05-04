@@ -1,5 +1,9 @@
 "use strict";
 
+const {
+  getGlobalJsonConfig
+} = require("../payments/supabase_store");
+
 const crypto = require("crypto");
 
 const SYSTEM_KEY_MARKER = "system-managed";
@@ -58,6 +62,8 @@ const DEFAULT_WEB_ENDPOINTS = {
   tavily: "https://api.tavily.com/search",
   serper: "https://google.serper.dev/search"
 };
+const PREMIUM_SERVICE_APIS_SETTING_KEY = "premium_service_apis_v1";
+let premiumServiceConfigRuntime = null;
 const SERVICE_PROVIDERS = {
   chat: ["superior_llm", "openrouter", "gemini", "openai", "anthropic", "deepseek", "nvidia", "nvidia_deepseek"],
   ocr: ["ocrspace", "nvidia", "superior_ocr"],
@@ -213,6 +219,64 @@ function normalizeApiKey(value) {
     .replace(/^api_key\s*=\s*/i, "")
     .replace(/^['"]|['"]$/g, "")
     .trim();
+}
+
+function sanitizeKeyList(value, maxItems = 50) {
+  const source = Array.isArray(value)
+    ? value
+    : String(value || "")
+        .split(/\r?\n|,/g)
+        .map((item) => item.trim());
+  const seen = new Set();
+  const output = [];
+  for (const raw of source) {
+    const key = normalizeApiKey(raw);
+    if (!key || key === SYSTEM_KEY_MARKER || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    output.push(key);
+    if (output.length >= maxItems) {
+      break;
+    }
+  }
+  return output;
+}
+
+function setPremiumServiceConfigRuntime(value) {
+  premiumServiceConfigRuntime = value && typeof value === "object" ? value : null;
+}
+
+async function ensurePremiumServiceConfigRuntime() {
+  if (premiumServiceConfigRuntime && typeof premiumServiceConfigRuntime === "object") {
+    return premiumServiceConfigRuntime;
+  }
+  const stored = await getGlobalJsonConfig(PREMIUM_SERVICE_APIS_SETTING_KEY).catch(() => null);
+  premiumServiceConfigRuntime = stored?.found && stored.value && typeof stored.value === "object"
+    ? stored.value
+    : {};
+  return premiumServiceConfigRuntime;
+}
+
+function getRuntimeWebSearchKeys(provider) {
+  const safeProvider = normalizeProvider(provider);
+  if (safeProvider !== "tavily" && safeProvider !== "serper") {
+    return [];
+  }
+  const source = premiumServiceConfigRuntime && typeof premiumServiceConfigRuntime === "object"
+    ? premiumServiceConfigRuntime
+    : {};
+  const webSearch = source.webSearch && typeof source.webSearch === "object" ? source.webSearch : {};
+  return sanitizeKeyList(webSearch[safeProvider] || []);
+}
+
+async function resolveSystemWebSearchApiKey(provider) {
+  const storedKeys = getRuntimeWebSearchKeys(provider);
+  if (storedKeys.length) {
+    return storedKeys[0];
+  }
+  await ensurePremiumServiceConfigRuntime();
+  return getRuntimeWebSearchKeys(provider)[0] || getResolvedSystemApiKey("webSearch", provider);
 }
 
 function buildEnvNames(service, provider, suffix = "") {
@@ -542,8 +606,12 @@ function protectUserStatePayload(namespace, email, value) {
   return clone;
 }
 
-function sanitizeSystemServiceConfig(value) {
+function sanitizeSystemServiceConfig(value, options = {}) {
   const source = value && typeof value === "object" ? value : {};
+  const webSearchSource = source.webSearch && typeof source.webSearch === "object" ? source.webSearch : {};
+  const configuredTavily = sanitizeKeyList(webSearchSource.tavily || []);
+  const configuredSerper = sanitizeKeyList(webSearchSource.serper || []);
+  const preserveWebSearchKeys = Boolean(options?.preserveWebSearchKeys);
   const sanitizeList = (service, items) => (Array.isArray(items) ? items : [])
     .map((entry, index) => {
       const provider = normalizeProvider(entry?.provider);
@@ -574,8 +642,12 @@ function sanitizeSystemServiceConfig(value) {
     asrApis: sanitizeList("asr", source.asrApis),
     imageApis: sanitizeList("image", source.imageApis),
     webSearch: {
-      tavily: getSystemApiKey("webSearch", "tavily") ? [SYSTEM_KEY_MARKER] : [],
-      serper: getSystemApiKey("webSearch", "serper") ? [SYSTEM_KEY_MARKER] : [],
+      tavily: preserveWebSearchKeys
+        ? configuredTavily
+        : (getSystemApiKey("webSearch", "tavily") || configuredTavily.length ? [SYSTEM_KEY_MARKER] : []),
+      serper: preserveWebSearchKeys
+        ? configuredSerper
+        : (getSystemApiKey("webSearch", "serper") || configuredSerper.length ? [SYSTEM_KEY_MARKER] : []),
       backendProxy: true,
       keySource: "system"
     }
@@ -1045,7 +1117,13 @@ async function proxyOcr(req, res) {
 async function proxyWebSearch(req, res) {
   const body = req.body && typeof req.body === "object" ? req.body : {};
   const provider = normalizeProvider(body.provider || "tavily");
-  const key = resolveRequestApiKey(req, "webSearch", provider);
+  const keySource = String(body.keySource || body.api?.keySource || "system").trim().toLowerCase();
+  const key = keySource === "system" || keySource === "env"
+    ? await resolveSystemWebSearchApiKey(provider)
+    : resolveRequestApiKey(req, "webSearch", provider);
+  if (!key) {
+    throw new Error(`${provider} webSearch API is not configured on the server.`);
+  }
   const query = String(body.query || "").trim();
   const resultLimit = Math.max(1, Math.min(10, Number(body.resultLimit) || 5));
   if (!query) {
@@ -1167,10 +1245,12 @@ async function handleProviderProxyRequest(req, res) {
 
 module.exports = {
   SYSTEM_KEY_MARKER,
+  PREMIUM_SERVICE_APIS_SETTING_KEY,
   buildSystemApiCapabilities,
   buildProviderProxyDiagnostics,
   protectUserStatePayload,
   sanitizeSystemServiceConfig,
+  setPremiumServiceConfigRuntime,
   decryptSecret,
   encryptSecret,
   handleProviderProxyRequest

@@ -45,10 +45,12 @@ const {
   createUserRateLimiter
 } = require("../security/rate_limit");
 const {
+  SYSTEM_KEY_MARKER,
   buildSystemApiCapabilities,
   handleProviderProxyRequest,
   protectUserStatePayload,
-  sanitizeSystemServiceConfig
+  sanitizeSystemServiceConfig,
+  setPremiumServiceConfigRuntime
 } = require("../providers/provider_proxy");
 const {
   z,
@@ -334,6 +336,23 @@ function resolvePremiumApiPayload(body) {
   return {};
 }
 
+function mergeStoredWebSearchMarkers(payload, previous) {
+  const next = payload && typeof payload === "object" ? { ...payload } : {};
+  const currentWebSearch = next.webSearch && typeof next.webSearch === "object" ? { ...next.webSearch } : {};
+  const previousWebSearch = previous?.webSearch && typeof previous.webSearch === "object" ? previous.webSearch : {};
+  for (const provider of ["tavily", "serper"]) {
+    const requested = Array.isArray(currentWebSearch[provider]) ? currentWebSearch[provider] : [];
+    if (!requested.some((key) => String(key || "").trim() === SYSTEM_KEY_MARKER)) {
+      continue;
+    }
+    const previousKeys = Array.isArray(previousWebSearch[provider]) ? previousWebSearch[provider] : [];
+    const merged = [...previousKeys, ...requested.filter((key) => String(key || "").trim() !== SYSTEM_KEY_MARKER)];
+    currentWebSearch[provider] = merged;
+  }
+  next.webSearch = currentWebSearch;
+  return next;
+}
+
 function mergeSuperiorSystemApis(systemApis, metadataApis, superiorProviders) {
   const systemList = Array.isArray(systemApis) ? systemApis : [];
   const metadataList = Array.isArray(metadataApis) ? metadataApis : [];
@@ -417,8 +436,10 @@ router.get("/config/premium-service-apis", async (_req, res) => {
 
   try {
     const stored = await getGlobalJsonConfig(PREMIUM_SERVICE_APIS_SETTING_KEY);
+    const rawConfig = stored?.found ? stored.value || {} : {};
+    setPremiumServiceConfigRuntime(rawConfig);
     const systemCapabilities = buildSystemApiCapabilities();
-    const metadata = sanitizeSystemServiceConfig(stored?.found ? stored.value || {} : {});
+    const metadata = sanitizeSystemServiceConfig(rawConfig);
     res.json({
       ok: true,
       premiumApis: {
@@ -426,7 +447,8 @@ router.get("/config/premium-service-apis", async (_req, res) => {
         chatApis: mergeSuperiorSystemApis(systemCapabilities.chatApis, metadata.chatApis, ["superior_llm"]),
         ocrApis: mergeSuperiorSystemApis(systemCapabilities.ocrApis, metadata.ocrApis, ["superior_ocr"]),
         asrApis: metadata.asrApis.length ? metadata.asrApis : systemCapabilities.asrApis,
-        imageApis: metadata.imageApis.length ? metadata.imageApis : systemCapabilities.imageApis
+        imageApis: metadata.imageApis.length ? metadata.imageApis : systemCapabilities.imageApis,
+        webSearch: metadata.webSearch || systemCapabilities.webSearch
       },
       source: stored?.table || "",
       found: Boolean(stored?.found)
@@ -483,17 +505,22 @@ router.post("/admin/config/premium-service-apis", validateRequest({ body: premiu
   }
 
   try {
+    const previousStored = await getGlobalJsonConfig(PREMIUM_SERVICE_APIS_SETTING_KEY).catch(() => null);
+    const previousConfig = previousStored?.found ? previousStored.value || {} : {};
+    const requestedPayload = mergeStoredWebSearchMarkers(resolvePremiumApiPayload(req.body), previousConfig);
     const payload = sanitizeSystemServiceConfig(
-      await validatePremiumServiceConfigEndpoints(resolvePremiumApiPayload(req.body))
+      await validatePremiumServiceConfigEndpoints(requestedPayload),
+      { preserveWebSearchKeys: true }
     );
     const stored = await upsertGlobalJsonConfig(PREMIUM_SERVICE_APIS_SETTING_KEY, payload);
     if (!stored?.stored) {
       throw new Error(stored?.reason || "Premium API settings table is not ready.");
     }
+    setPremiumServiceConfigRuntime(stored.value || payload);
 
     res.json({
       ok: true,
-      premiumApis: sanitizeSystemServiceConfig(stored.value || {}),
+      premiumApis: sanitizeSystemServiceConfig(stored.value || payload),
       source: stored.table || ""
     });
   } catch (error) {
