@@ -138,7 +138,20 @@ async function main() {
   )
     .trim()
     .toLowerCase();
+  const authToken = String(
+    args.authToken || process.env.CHECK_AUTH_TOKEN || process.env.SESSION_KEY || ""
+  ).trim();
+  const authEmail = String(args.authEmail || args.userEmail || userId || "")
+    .trim()
+    .toLowerCase();
   const webhookSecret = String(args.webhookSecret || process.env.RAZORPAY_WEBHOOK_SECRET || "").trim();
+
+  const authHeaders = authToken
+    ? {
+        Authorization: `Bearer ${authToken}`,
+        "x-thinkpulse-user-email": authEmail
+      }
+    : null;
 
   const runFull = asBool(args.full);
   const runCreateQr = runFull || asBool(args["create-qr"]);
@@ -180,33 +193,48 @@ async function main() {
     pushCheck("Webhook status endpoint", "FAIL", `Request failed: ${error?.message || error}`);
   }
 
-  try {
-    const txStatus = await requestJson(
-      "GET",
-      buildUrl(baseUrl, "/transaction-status/order_cache_header_probe")
-    );
-    const hasNoStore = headerHas(txStatus.headers, "cache-control", "no-store");
-    if (txStatus.status === 200 && hasNoStore) {
-      pushCheck("Transaction status no-store", "PASS", "Cache-Control includes no-store");
-    } else {
-      pushCheck(
-        "Transaction status no-store",
-        "FAIL",
-        `status=${txStatus.status}, cache-control=${txStatus.headers.get("cache-control") || ""}`
+  if (!authHeaders) {
+    pushCheck("Transaction status no-store", "SKIP", "Requires --authToken or CHECK_AUTH_TOKEN/SESSION_KEY");
+  } else {
+    try {
+      const txStatus = await requestJson(
+        "GET",
+        buildUrl(baseUrl, "/transaction-status/order_cache_header_probe"),
+        undefined,
+        authHeaders
       );
+      const hasNoStore = headerHas(txStatus.headers, "cache-control", "no-store");
+      if (txStatus.status === 200 && hasNoStore) {
+        pushCheck("Transaction status no-store", "PASS", "Cache-Control includes no-store");
+      } else {
+        pushCheck(
+          "Transaction status no-store",
+          "FAIL",
+          `status=${txStatus.status}, cache-control=${txStatus.headers.get("cache-control") || ""}`
+        );
+      }
+    } catch (error) {
+      pushCheck("Transaction status no-store", "FAIL", `Request failed: ${error?.message || error}`);
     }
-  } catch (error) {
-    pushCheck("Transaction status no-store", "FAIL", `Request failed: ${error?.message || error}`);
   }
 
   if (runCreateQr) {
+    if (!authHeaders) {
+      pushCheck("Create QR flow", "SKIP", "Requires --authToken or CHECK_AUTH_TOKEN/SESSION_KEY");
+      pushCheck("QR status polling endpoint", "SKIP", "Requires authenticated QR creation");
+    } else {
     try {
-      const createQr = await requestJson("POST", buildUrl(baseUrl, "/create-qr"), {
-        amount: amountInr,
-        userId,
-        kind: "wallet_topup",
-        description: "Integration check QR"
-      });
+      const createQr = await requestJson(
+        "POST",
+        buildUrl(baseUrl, "/create-qr"),
+        {
+          amount: amountInr,
+          userId,
+          kind: "wallet_topup",
+          description: "Integration check QR"
+        },
+        authHeaders
+      );
 
       if (createQr.status === 201 && createQr.json?.ok === true && createQr.json?.qr?.id) {
         createdQrId = String(createQr.json.qr.id || "").trim();
@@ -218,7 +246,9 @@ async function main() {
           buildUrl(
             baseUrl,
             `/qr-status/${encodeURIComponent(createdQrId)}?userId=${encodeURIComponent(userId)}`
-          )
+          ),
+          undefined,
+          authHeaders
         );
         const hasNoStore = headerHas(qrStatus.headers, "cache-control", "no-store");
         if (qrStatus.status === 200 && qrStatus.json?.ok === true && hasNoStore) {
@@ -240,31 +270,41 @@ async function main() {
     } catch (error) {
       pushCheck("Create QR flow", "FAIL", `Request failed: ${error?.message || error}`);
     }
+    }
   } else {
     pushCheck("Create QR flow", "SKIP", "Enable with --create-qr=true or --full=true");
     pushCheck("QR status polling endpoint", "SKIP", "Requires QR creation");
   }
 
-  try {
-    const invalidVerify = await requestJson("POST", buildUrl(baseUrl, "/verify-payment"), {
-      razorpay_order_id: "order_invalid_check",
-      razorpay_payment_id: "pay_invalid_check",
-      razorpay_signature: "invalid_signature",
-      amount: 10,
-      userId
-    });
-
-    if (invalidVerify.status === 400 && invalidVerify.json?.verified === false) {
-      pushCheck("Verify-payment signature rejection", "PASS", "Invalid signature rejected");
-    } else {
-      pushCheck(
-        "Verify-payment signature rejection",
-        "FAIL",
-        `Expected 400 invalid signature, got status=${invalidVerify.status}`
+  if (!authHeaders) {
+    pushCheck("Verify-payment signature rejection", "SKIP", "Requires --authToken or CHECK_AUTH_TOKEN/SESSION_KEY");
+  } else {
+    try {
+      const invalidVerify = await requestJson(
+        "POST",
+        buildUrl(baseUrl, "/verify-payment"),
+        {
+          razorpay_order_id: "order_invalid_check",
+          razorpay_payment_id: "pay_invalid_check",
+          razorpay_signature: "invalid_signature",
+          amount: 10,
+          userId
+        },
+        authHeaders
       );
+
+      if (invalidVerify.status === 400 && invalidVerify.json?.verified === false) {
+        pushCheck("Verify-payment signature rejection", "PASS", "Invalid signature rejected");
+      } else {
+        pushCheck(
+          "Verify-payment signature rejection",
+          "FAIL",
+          `Expected 400 invalid signature, got status=${invalidVerify.status}`
+        );
+      }
+    } catch (error) {
+      pushCheck("Verify-payment signature rejection", "FAIL", `Request failed: ${error?.message || error}`);
     }
-  } catch (error) {
-    pushCheck("Verify-payment signature rejection", "FAIL", `Request failed: ${error?.message || error}`);
   }
 
   if (webhookSecret) {
@@ -428,6 +468,7 @@ async function main() {
   console.log(`Base URL: ${baseUrl}`);
   console.log(`User ID: ${userId}`);
   console.log(`Amount INR: ${amountInr}`);
+  console.log(`Auth token provided: ${authHeaders ? "yes" : "no"}`);
   console.log(`Checks: PASS=${passCount} FAIL=${failCount} SKIP=${skipCount}`);
   console.log("");
 
