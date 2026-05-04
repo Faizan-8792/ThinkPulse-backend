@@ -46,7 +46,13 @@ const globalIpRateLimiter = createGlobalIpRateLimiter();
 
 const nodeEnv = String(process.env.NODE_ENV || "development").trim().toLowerCase();
 const requestedMode = String(process.env.MODE || "").trim().toLowerCase();
-const mode = requestedMode === "live" || (!requestedMode && nodeEnv === "production") ? "live" : "test";
+const allowProductionTestMode = ["1", "true", "yes"].includes(
+  String(process.env.ALLOW_PRODUCTION_TEST_MODE || "").trim().toLowerCase()
+);
+const normalizedRequestedMode = requestedMode === "live" || requestedMode === "test" ? requestedMode : "";
+const mode = nodeEnv === "production" && !allowProductionTestMode
+  ? "live"
+  : normalizedRequestedMode || "test";
 const stripeSecretKey = mode === "live"
   ? String(process.env.STRIPE_LIVE_SECRET_KEY || "").trim()
   : String(process.env.STRIPE_TEST_SECRET_KEY || "").trim();
@@ -228,7 +234,11 @@ function validateRuntimeConfig() {
     warnings.push("MODE should be either test or live. Unknown values fall back to test outside production.");
   }
 
-  if (nodeEnv === "production" && mode !== "live") {
+  if (nodeEnv === "production" && requestedMode === "test" && !allowProductionTestMode) {
+    warnings.push("MODE=test is ignored in production. Backend is running in live mode.");
+  }
+
+  if (nodeEnv === "production" && mode !== "live" && !allowProductionTestMode) {
     errors.push("Production deployments must run with MODE=live or leave MODE unset.");
   }
 
