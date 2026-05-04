@@ -249,14 +249,27 @@ function getSystemApiKey(service, provider) {
 }
 
 function getResolvedSystemApiKey(service, provider) {
+  const safeService = normalizeService(service);
   const safeProvider = normalizeProvider(provider);
-  const primary = getSystemApiKey(service, safeProvider);
+  const primary = getSystemApiKey(safeService, safeProvider);
   if (primary) {
     return primary;
   }
-  const upstreamProvider = getSystemProvider(service, safeProvider);
+  const upstreamProvider = getSystemProvider(safeService, safeProvider);
   if (upstreamProvider && upstreamProvider !== safeProvider) {
-    return getSystemApiKey(service, upstreamProvider);
+    const upstreamKey = getSystemApiKey(safeService, upstreamProvider);
+    if (upstreamKey) {
+      return upstreamKey;
+    }
+  }
+  if (
+    safeService === "chat" &&
+    (safeProvider === "nvidia" || safeProvider === "nvidia_deepseek")
+  ) {
+    const superiorKey = getSystemApiKey(safeService, "superior_llm");
+    if (superiorKey) {
+      return superiorKey;
+    }
   }
   return "";
 }
