@@ -83,11 +83,16 @@ function normalizeAccountStatusRecord(email, value = null) {
   const source = value && typeof value === "object" ? value : {};
   const status = String(source.status || "").trim().toLowerCase();
   const normalizedStatus = status === "blocked" || status === "deleted" ? status : "active";
+  const apiBlocked = Boolean(source.apiBlocked || source.api_blocked);
   return {
     email: normalizeEmail(email),
     status: normalizedStatus,
     blocked: normalizedStatus === "blocked",
     deleted: normalizedStatus === "deleted",
+    apiBlocked,
+    apiBlockedAt: apiBlocked ? Math.max(0, Number(source.apiBlockedAt) || 0) : 0,
+    apiBlockedByEmail: apiBlocked ? normalizeEmail(source.apiBlockedByEmail || source.apiBlockedBy || "") : "",
+    apiBlockNote: apiBlocked ? String(source.apiBlockNote || source.apiReason || "").trim().slice(0, 220) : "",
     note: String(source.note || "").trim().slice(0, 220)
   };
 }

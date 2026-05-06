@@ -118,6 +118,7 @@ function buildUserAccountStatusKey(email) {
 function normalizeAccountStatusRecord(email, value = null) {
   const source = value && typeof value === "object" ? value : {};
   const status = normalizeAccountStatus(source.status);
+  const apiBlocked = Boolean(source.apiBlocked || source.api_blocked);
   return {
     email: normalizeEmail(email),
     status,
@@ -128,6 +129,10 @@ function normalizeAccountStatusRecord(email, value = null) {
     deletedAt: Math.max(0, Number(source.deletedAt) || 0),
     deletedByEmail: normalizeEmail(source.deletedByEmail || ""),
     lastDeletedAt: Math.max(0, Number(source.lastDeletedAt || source.deletedAt) || 0),
+    apiBlocked,
+    apiBlockedAt: apiBlocked ? Math.max(0, Number(source.apiBlockedAt) || 0) : 0,
+    apiBlockedByEmail: apiBlocked ? normalizeEmail(source.apiBlockedByEmail || source.apiBlockedBy || "") : "",
+    apiBlockNote: apiBlocked ? String(source.apiBlockNote || source.apiReason || "").trim().slice(0, 220) : "",
     note: String(source.note || "").trim().slice(0, 220),
     updatedAt: Math.max(0, Number(source.updatedAt) || 0)
   };
@@ -164,6 +169,9 @@ async function saveUserAccountStatus(email, patch = {}) {
 
   const previous = await getUserAccountStatus(safeEmail).catch(() => null);
   const status = normalizeAccountStatus(patch.status);
+  const apiBlocked = typeof patch.apiBlocked === "boolean"
+    ? patch.apiBlocked
+    : Boolean(previous?.status?.apiBlocked);
   const now = Date.now();
   const record = normalizeAccountStatusRecord(safeEmail, {
     ...(previous?.status || {}),
@@ -180,6 +188,16 @@ async function saveUserAccountStatus(email, patch = {}) {
     lastDeletedAt: status === "deleted"
       ? Math.max(0, Number(patch.deletedAt) || now)
       : Math.max(0, Number(patch.lastDeletedAt || previous?.status?.lastDeletedAt) || 0),
+    apiBlocked,
+    apiBlockedAt: apiBlocked
+      ? Math.max(0, Number(patch.apiBlockedAt || previous?.status?.apiBlockedAt) || now)
+      : 0,
+    apiBlockedByEmail: apiBlocked
+      ? normalizeEmail(patch.apiBlockedByEmail || previous?.status?.apiBlockedByEmail || "")
+      : "",
+    apiBlockNote: apiBlocked
+      ? String(patch.apiBlockNote || previous?.status?.apiBlockNote || "").trim().slice(0, 220)
+      : "",
     updatedAt: now
   });
   const stored = await upsertGlobalJsonConfig(key, record);
@@ -765,6 +783,10 @@ router.post("/users/upsert", validateRequest({ body: userUpsertBodySchema }), as
     const activatedStatus = await saveUserAccountStatus(email, {
       status: "active",
       lastDeletedAt: incomingAccountStatus.lastDeletedAt,
+      apiBlocked: incomingAccountStatus.deleted ? false : Boolean(incomingAccountStatus.apiBlocked),
+      apiBlockedAt: incomingAccountStatus.deleted ? 0 : incomingAccountStatus.apiBlockedAt,
+      apiBlockedByEmail: incomingAccountStatus.deleted ? "" : incomingAccountStatus.apiBlockedByEmail,
+      apiBlockNote: incomingAccountStatus.deleted ? "" : incomingAccountStatus.apiBlockNote,
       note: ""
     }).catch(() => null);
 
@@ -1032,6 +1054,81 @@ router.post("/admin/users/block", validateRequest({ body: adminBlockBodySchema }
   }
 });
 
+router.post("/admin/users/api-block", validateRequest({ body: adminBlockBodySchema }), async (req, res) => {
+  const email = normalizeEmail(req.body?.email || req.body?.userId || req.body?.user_id);
+  const actorEmail = normalizeEmail(req.user?.email || "");
+  const blocked = Boolean(req.body?.blocked);
+  const note = String(
+    req.body?.note ||
+    (blocked ? `API blocked by ${actorEmail || "admin"}` : `API unblocked by ${actorEmail || "admin"}`)
+  ).trim().slice(0, 220);
+
+  if (!email) {
+    res.status(400).json({
+      ok: false,
+      error: "Valid email is required."
+    });
+    return;
+  }
+
+  try {
+    const role = await resolveTrustedRole(email);
+    if (role === "admin") {
+      res.status(400).json({
+        ok: false,
+        error: "Admin accounts cannot be API-blocked."
+      });
+      return;
+    }
+
+    const previous = await getUserAccountStatus(email).catch(() => null);
+    const currentStatus = normalizeAccountStatus(previous?.status?.status);
+    if (currentStatus === "deleted") {
+      res.status(400).json({
+        ok: false,
+        error: "Deleted accounts cannot be API-blocked."
+      });
+      return;
+    }
+    if (blocked) {
+      const planState = await getUserPlanState({ userId: email }).catch(() => null);
+      const effectivePlan = normalizePlan(planState?.found ? planState.plan : "free") || "free";
+      if (effectivePlan !== "free") {
+        res.status(400).json({
+          ok: false,
+          error: "Block API is only available for Free users."
+        });
+        return;
+      }
+    }
+
+    const stored = await saveUserAccountStatus(email, {
+      status: currentStatus,
+      blockedAt: previous?.status?.blockedAt || 0,
+      blockedByEmail: previous?.status?.blockedByEmail || "",
+      note: previous?.status?.note || "",
+      lastDeletedAt: previous?.status?.lastDeletedAt || 0,
+      apiBlocked: blocked,
+      apiBlockedAt: blocked ? Date.now() : 0,
+      apiBlockedByEmail: blocked ? actorEmail : "",
+      apiBlockNote: blocked ? note : ""
+    });
+
+    res.json({
+      ok: true,
+      email,
+      apiBlocked: blocked,
+      accountStatus: stored.status,
+      source: stored.table || ""
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error?.message || "Unable to update user API access."
+    });
+  }
+});
+
 router.post("/admin/users/delete", validateRequest({ body: adminDeleteBodySchema }), async (req, res) => {
   const email = normalizeEmail(req.body?.email || req.body?.userId || req.body?.user_id);
   if (!email) {
@@ -1080,6 +1177,10 @@ router.post("/admin/users/delete", validateRequest({ body: adminDeleteBodySchema
       status: "deleted",
       deletedAt,
       deletedByEmail: normalizeEmail(req.user?.email || ""),
+      apiBlocked: false,
+      apiBlockedAt: 0,
+      apiBlockedByEmail: "",
+      apiBlockNote: "",
       note: "Deleted by admin"
     }).catch(() => null);
 
