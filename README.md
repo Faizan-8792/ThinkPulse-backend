@@ -45,6 +45,7 @@ Also keep existing keys already used by your backend:
 
 - `PORT`
 - `CORS_ORIGINS`
+- `CHROME_EXTENSION_ORIGINS`
 - Stripe variables (`STRIPE_*`) if Stripe endpoints are still used
 
 ## Payment APIs (Razorpay)
@@ -351,6 +352,20 @@ What this verifies:
 - duplicate `payment.captured` webhook idempotency
 - pending transaction transition to `paid` (when QR reference is available)
 - verify-payment signature rejection path
+
+## Release Verification
+
+Run static backend and extension release checks:
+
+```bash
+npm test
+```
+
+Run strict production environment validation after deployment secrets are configured:
+
+```bash
+npm run check:env:production
+```
 
 ## Chrome Extension Fetch Snippets
 

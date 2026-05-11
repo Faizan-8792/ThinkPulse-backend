@@ -7,6 +7,9 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
+    "test": "npm run check:release",
+    "check:release": "node scripts/production_check.js",
+    "check:env:production": "NODE_ENV=production node scripts/production_check.js --strict-env",
     "check:razorpay": "node scripts/razorpay_integration_check.js",
     "check:razorpay:full": "node scripts/razorpay_integration_check.js --full=true"
   },

@@ -210,6 +210,8 @@ const corsOrigins = String(process.env.CORS_ORIGINS || "")
   .split(",")
   .map((item) => item.trim())
   .filter(Boolean);
+const chromeExtensionOrigins = parseEnvList("CHROME_EXTENSION_ORIGINS", 50)
+  .filter((item) => item.startsWith("chrome-extension://"));
 
 /**
  * Validates runtime environment for payment and webhook flows.
@@ -264,6 +266,12 @@ function validateRuntimeConfig() {
   if (nodeEnv === "production" && corsOrigins.length === 0) {
     warnings.push("CORS_ORIGINS is empty in production. Browser web origins will be limited to PUBLIC_BASE_URL and Chrome extension origins.");
   }
+  if (
+    nodeEnv === "production" &&
+    ![...corsOrigins, ...chromeExtensionOrigins].some((item) => item.startsWith("chrome-extension://"))
+  ) {
+    warnings.push("Configure the published extension origin in CORS_ORIGINS or CHROME_EXTENSION_ORIGINS before Chrome Web Store release.");
+  }
 
   return {
     errors,
@@ -294,9 +302,12 @@ app.use(cors({
     const safeOrigin = String(origin || "").trim();
     const isChromeExtension = safeOrigin.startsWith("chrome-extension://");
     const isConfiguredOrigin = corsOrigins.includes(safeOrigin);
+    const isAllowedChromeExtension =
+      isChromeExtension &&
+      (nodeEnv !== "production" || isConfiguredOrigin || chromeExtensionOrigins.includes(safeOrigin));
     const isPublicOrigin = Boolean(publicBaseOrigin && safeOrigin === publicBaseOrigin);
     const isOpenDevCors = nodeEnv !== "production" && corsOrigins.length === 0;
-    if (!safeOrigin || isConfiguredOrigin || isPublicOrigin || isChromeExtension || isOpenDevCors) {
+    if (!safeOrigin || isConfiguredOrigin || isPublicOrigin || isAllowedChromeExtension || isOpenDevCors) {
       callback(null, true);
       return;
     }
