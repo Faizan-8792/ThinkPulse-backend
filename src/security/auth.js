@@ -1,5 +1,21 @@
 "use strict";
 
+/**
+ * @file auth.js
+ * @description Request authentication and role-resolution middleware for the
+ * ThinkPulse backend API.
+ *
+ * Responsibilities:
+ *   - Validates incoming Bearer tokens against the Google OAuth userinfo
+ *     endpoint and caches results in a short-lived in-memory TTL store to
+ *     avoid redundant network calls on every request.
+ *   - Resolves the caller's role (admin / premium / user) by checking a
+ *     static admin email list and the Supabase plan state table.
+ *   - Enforces account-level access controls (blocked / deleted accounts).
+ *   - Exports Express middleware factories: `authenticateRequest`,
+ *     `requireRole`, and `requireSelfOrAdmin`.
+ */
+
 const {
   getGlobalJsonConfig,
   getUserPlanState
@@ -11,18 +27,41 @@ const {
   logSecurityEvent
 } = require("./logger");
 
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+/** Google OAuth v3 userinfo endpoint used to verify access tokens. */
 const GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo";
+
+/** Prefix for per-user account status keys stored in the app_settings table. */
 const USER_ACCOUNT_STATUS_SETTING_PREFIX = "user_account_status:";
+
+/**
+ * Hardcoded admin email addresses. These are always treated as admins
+ * regardless of the plan state stored in the database. Additional admins
+ * can be granted via the THINKPULSE_ADMIN_EMAILS / ADMIN_EMAILS env vars.
+ */
 const DEFAULT_ADMIN_EMAILS = [
   "saifullahfaizan786@gmail.com",
-  "saifullahfaizan.23@nshm.edu.in",
-  "admin@gmail.com"
+  "saifullahfaizan.23@nshm.edu.in"
 ];
+
+/**
+ * Short-lived in-memory cache for validated Google token → identity mappings.
+ * Reduces latency and avoids hitting the Google userinfo endpoint on every
+ * authenticated API request within the same service worker process lifetime.
+ */
 const tokenValidationCache = new InMemoryTtlStore({
   maxEntries: 4000,
   sweepIntervalMs: 60000
 });
 
+/**
+ * Parses the THINKPULSE_ADMIN_EMAILS and ADMIN_EMAILS environment variables
+ * into a deduplicated array of normalised email strings. Supports both
+ * comma-separated and newline-separated values.
+ *
+ * @returns {string[]}
+ */
 function parseEnvEmailList() {
   const source = [
     String(process.env.THINKPULSE_ADMIN_EMAILS || "").trim(),
@@ -43,16 +82,34 @@ function parseEnvEmailList() {
   return out;
 }
 
+/**
+ * Merged set of all admin emails: hardcoded defaults plus any addresses
+ * supplied via environment variables. Built once at module load time.
+ */
 const adminEmailSet = new Set([
   ...DEFAULT_ADMIN_EMAILS.map((value) => normalizeEmail(value)).filter(Boolean),
   ...parseEnvEmailList()
 ]);
 
+/**
+ * Normalises an email address to lowercase and trims whitespace.
+ * Returns an empty string if the value does not contain "@".
+ *
+ * @param {unknown} value
+ * @returns {string}
+ */
 function normalizeEmail(value) {
   const safe = String(value || "").trim().toLowerCase().slice(0, 180);
   return safe.includes("@") ? safe : "";
 }
 
+/**
+ * Extracts the raw token from an "Authorization: Bearer <token>" header value.
+ * Returns an empty string if the header is missing or malformed.
+ *
+ * @param {unknown} value
+ * @returns {string}
+ */
 function normalizeBearerToken(value) {
   const raw = String(value || "").trim();
   if (!/^bearer\s+/i.test(raw)) {
@@ -61,6 +118,13 @@ function normalizeBearerToken(value) {
   return raw.replace(/^bearer\s+/i, "").trim();
 }
 
+/**
+ * Coerces an arbitrary role string to one of the three recognised values.
+ * Any unrecognised input falls back to "user".
+ *
+ * @param {unknown} value
+ * @returns {"admin"|"premium"|"user"}
+ */
 function normalizeRole(value) {
   const safe = String(value || "").trim().toLowerCase();
   if (safe === "admin" || safe === "premium" || safe === "user") {
@@ -69,6 +133,13 @@ function normalizeRole(value) {
   return "user";
 }
 
+/**
+ * Returns a numeric rank for a role string, used for minimum-role comparisons.
+ * admin = 3, premium = 2, user = 1.
+ *
+ * @param {unknown} value
+ * @returns {number}
+ */
 function roleRank(value) {
   const role = normalizeRole(value);
   if (role === "admin") {
