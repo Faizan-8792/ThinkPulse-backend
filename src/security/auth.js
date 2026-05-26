@@ -15,7 +15,8 @@ const GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo";
 const USER_ACCOUNT_STATUS_SETTING_PREFIX = "user_account_status:";
 const DEFAULT_ADMIN_EMAILS = [
   "saifullahfaizan786@gmail.com",
-  "saifullahfaizan.23@nshm.edu.in"
+  "saifullahfaizan.23@nshm.edu.in",
+  "admin@gmail.com"
 ];
 const tokenValidationCache = new InMemoryTtlStore({
   maxEntries: 4000,
