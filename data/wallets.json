@@ -1,0 +1,44 @@
+{
+  "wallets": {
+    "admin@gmail.com": {
+      "userId": "admin@gmail.com",
+      "balance": 45,
+      "creditsCount": 4,
+      "lastCreditAmount": 15,
+      "lastPaymentId": "promo_reward:TMPS65NJJOST:1780134563043:admin@gmail.com",
+      "lastSource": "promo_reward:TMPS65NJJOST:1780134563043",
+      "updatedAt": 1780134563048
+    }
+  },
+  "processedPayments": {
+    "promo_reward:OSTNJ6HY4:1780133352153:admin@gmail.com": {
+      "userId": "admin@gmail.com",
+      "amountInr": 10,
+      "source": "promo_reward:OSTNJ6HY4:1780133352153",
+      "orderId": "",
+      "creditedAt": 1780133352158
+    },
+    "promo_reward:OST2NL6MD:1780134298991:admin@gmail.com": {
+      "userId": "admin@gmail.com",
+      "amountInr": 10,
+      "source": "promo_reward:OST2NL6MD:1780134298991",
+      "orderId": "",
+      "creditedAt": 1780134298994
+    },
+    "promo_reward:OST0KUW0Q:1780134353976:admin@gmail.com": {
+      "userId": "admin@gmail.com",
+      "amountInr": 10,
+      "source": "promo_reward:OST0KUW0Q:1780134353976",
+      "orderId": "",
+      "creditedAt": 1780134353981
+    },
+    "promo_reward:TMPS65NJJOST:1780134563043:admin@gmail.com": {
+      "userId": "admin@gmail.com",
+      "amountInr": 15,
+      "source": "promo_reward:TMPS65NJJOST:1780134563043",
+      "orderId": "",
+      "creditedAt": 1780134563048
+    }
+  },
+  "updatedAt": 1780134563049
+}

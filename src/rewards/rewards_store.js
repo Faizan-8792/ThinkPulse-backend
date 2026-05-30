@@ -797,7 +797,10 @@ async function upsertPromoCode(input, actorEmail = "") {
 
   store.promos[promo.code] = promo;
   await persistStore();
-  const promoAssignmentKey = String(Math.max(0, Number(promo?.updatedAt || now)) || now);
+  // Use the promo's createdAt (set once when the code is first created) so
+  // re-upserting the same code does not generate duplicate "promo assigned"
+  // notifications. updatedAt would change on every save and break dedupe.
+  const promoAssignmentKey = String(Math.max(0, Number(promo?.createdAt || now)) || now);
 
   await appendRewardEvent({
     kind: "admin_create",
