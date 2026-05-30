@@ -1231,19 +1231,32 @@ async function deleteSingleUserCompletely(email, actorEmail) {
     return { ok: false, status: 400, error: "Admin accounts cannot be deleted." };
   }
 
-  const wallet = await deleteWalletSnapshot(safeEmail);
+  const wallet = await deleteWalletSnapshot(safeEmail).catch((error) => ({
+    deleted: false,
+    userId: safeEmail,
+    walletRemoved: false,
+    processedPaymentsRemoved: 0,
+    error: error?.message || "Unable to delete wallet snapshot."
+  }));
   let payments = { deleted: false, count: 0, reason: "Supabase is not configured." };
   let planReset = { updated: false, reason: "Supabase is not configured." };
 
   if (isSupabaseConfigured()) {
-    payments = await deleteUserPaymentRecords({ userId: safeEmail });
+    payments = await deleteUserPaymentRecords({ userId: safeEmail }).catch((error) => ({
+      deleted: false,
+      count: 0,
+      reason: error?.message || "Unable to delete payment records."
+    }));
     planReset = await setUserPlanState({
       userId: safeEmail,
       plan: "free"
-    });
+    }).catch((error) => ({
+      updated: false,
+      reason: error?.message || "Unable to reset plan state."
+    }));
   }
 
-  const userState = await deleteAllUserStateConfigs(safeEmail);
+  const userState = await deleteAllUserStateConfigs(safeEmail).catch(() => ({}));
   const rewards = await deleteRewardRecordsForEmail(safeEmail).catch((error) => ({
     ok: false,
     error: error?.message || "Unable to delete reward records."
