@@ -21,10 +21,16 @@ const crypto = require("crypto");
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
-/** Default lifetime for issued demo tokens (30 days). */
-const DEFAULT_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+/** Default lifetime for issued demo tokens. */
+const DEFAULT_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
-/** Hardcoded fallback demo accounts used when DEMO_ACCOUNTS env is unset. */
+/**
+ * Hardcoded fallback demo accounts.
+ *
+ * SECURITY: This fallback is only honoured when NODE_ENV is not "production".
+ * Production deployments MUST configure DEMO_ACCOUNTS explicitly. If the env
+ * var is missing in production, demo sign-in is disabled outright.
+ */
 const DEFAULT_DEMO_ACCOUNTS = [
   { email: "admin@gmail.com", password: "admin@8792187937" }
 ];
@@ -85,7 +91,10 @@ function parseDemoAccountsEnv() {
 
 /**
  * Loads the active demo account list. Env-configured accounts take precedence;
- * the hardcoded fallback is only used when no env-configured accounts exist.
+ * the hardcoded fallback is only honoured outside of production so reviewers
+ * and local developers can sign in without configuring `DEMO_ACCOUNTS`.
+ *
+ * In production, demo sign-in is disabled when `DEMO_ACCOUNTS` is not set.
  *
  * @returns {Array<{email:string,password:string}>}
  */
@@ -93,6 +102,9 @@ function getDemoAccounts() {
   const fromEnv = parseDemoAccountsEnv();
   if (fromEnv.length > 0) {
     return fromEnv;
+  }
+  if (String(process.env.NODE_ENV || "").trim().toLowerCase() === "production") {
+    return [];
   }
   return DEFAULT_DEMO_ACCOUNTS;
 }
@@ -128,7 +140,12 @@ function validateDemoCredentials(email, password) {
     return { ok: false, error: "Email and password are required." };
   }
 
-  for (const account of getDemoAccounts()) {
+  const accounts = getDemoAccounts();
+  if (accounts.length === 0) {
+    return { ok: false, error: "Demo sign-in is not enabled on this server." };
+  }
+
+  for (const account of accounts) {
     if (account.email === safeEmail && safeStringCompare(account.password, safePassword)) {
       return { ok: true, email: safeEmail };
     }

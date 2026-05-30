@@ -100,6 +100,23 @@ class InMemoryTtlStore {
     return this.store.delete(safeKey);
   }
 
+  /**
+   * Iterates live (non-expired) entries. Useful for callers that need to
+   * scan the cache (e.g. invalidating every token bound to a given email).
+   *
+   * @returns {IterableIterator<[string, *]>}
+   */
+  *entries() {
+    const now = this.now();
+    for (const [key, entry] of this.store.entries()) {
+      if (Number(entry?.expiresAt || 0) > 0 && Number(entry.expiresAt) <= now) {
+        this.store.delete(key);
+        continue;
+      }
+      yield [key, entry.value];
+    }
+  }
+
   prune(now = this.now()) {
     for (const [key, entry] of this.store.entries()) {
       if (Number(entry?.expiresAt || 0) > 0 && Number(entry.expiresAt) <= now) {

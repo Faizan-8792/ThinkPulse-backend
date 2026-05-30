@@ -9,10 +9,37 @@ const { resolveStorePath } = require("../storage/store_path");
 
 const JOINING_BONUS_PAISE = 2000;
 const MAX_NOTIFICATIONS = 6000;
+const MAX_NOTIFICATIONS_PER_EMAIL = 200;
 const MAX_REWARD_EVENTS = 6000;
 const MAX_NOTIFICATION_RECEIPTS_PER_EMAIL = 600;
 const MAX_PROMO_REDEMPTIONS = 500;
 const rewardsStorePath = resolveStorePath(process.env.REWARDS_STORE_PATH, "rewards.json");
+
+/**
+ * Serialises concurrent operations against the same key. Returns a promise
+ * that resolves once `task` completes; subsequent callers for the same key
+ * await the in-flight promise so the protected block runs at most once at
+ * a time per key. Used to make claimJoiningBonus / redeemPromoCode atomic
+ * across overlapping requests.
+ */
+const inflightMutexes = new Map();
+function withKeyedMutex(key, task) {
+  const safeKey = String(key || "").trim();
+  if (!safeKey) {
+    return task();
+  }
+  const previous = inflightMutexes.get(safeKey) || Promise.resolve();
+  const next = previous.catch(() => undefined).then(() => task());
+  inflightMutexes.set(
+    safeKey,
+    next.finally(() => {
+      if (inflightMutexes.get(safeKey) === next) {
+        inflightMutexes.delete(safeKey);
+      }
+    })
+  );
+  return next;
+}
 
 let store = {
   promos: {},
@@ -274,7 +301,7 @@ function normalizePromoRecord(value, fallbackCode = "") {
     maxRewardPaise: normalizePaise(value.maxRewardPaise),
     usageLimit: type === "invite_bonus"
       ? 1
-      : Math.max(1, Math.min(5000, Math.round(Number(value.usageLimit) || 1))),
+      : Math.max(1, Math.min(MAX_PROMO_REDEMPTIONS, Math.round(Number(value.usageLimit) || 1))),
     usedCount: Math.max(0, Math.round(Number(value.usedCount) || redemptions.length)),
     blockedSelfUse: value.blockedSelfUse !== false,
     redemptions,
@@ -330,8 +357,8 @@ function normalizeStorePayload(value) {
       createdAt: toEpochMs(item?.createdAt) || Date.now(),
       dedupeKey: toSafeString(item?.dedupeKey, 220)
     }))
-    .filter((item) => item.email)
-    .slice(0, MAX_NOTIFICATIONS);
+    .filter((item) => item.email);
+  next.notifications = trimNotificationsByEmail(next.notifications, MAX_NOTIFICATIONS_PER_EMAIL).slice(0, MAX_NOTIFICATIONS);
   next.rewardEvents = (Array.isArray(source.rewardEvents) ? source.rewardEvents : [])
     .map((event) => ({
       id: toSafeString(event?.id, 80) || `reward:${Date.now()}:${Math.random().toString(36).slice(2)}`,
@@ -376,7 +403,12 @@ function persistStore() {
     .catch(() => undefined)
     .then(async () => {
       await fs.promises.mkdir(path.dirname(rewardsStorePath), { recursive: true });
-      await fs.promises.writeFile(rewardsStorePath, JSON.stringify(snapshot, null, 2), "utf8");
+      // Atomic write: stage to a sibling temp file then rename, so a crash
+      // mid-write cannot leave a truncated rewards.json that ensureLoaded()
+      // would catch as a parse error and reset to empty.
+      const tempPath = `${rewardsStorePath}.tmp-${process.pid}-${Date.now()}`;
+      await fs.promises.writeFile(tempPath, JSON.stringify(snapshot, null, 2), "utf8");
+      await fs.promises.rename(tempPath, rewardsStorePath);
     });
   return persistQueue;
 }
@@ -432,9 +464,41 @@ async function appendNotification(notification) {
     dedupeKey
   };
   store.notifications.unshift(item);
-  store.notifications = store.notifications.slice(0, MAX_NOTIFICATIONS);
+  store.notifications = trimNotificationsByEmail(store.notifications, MAX_NOTIFICATIONS_PER_EMAIL).slice(0, MAX_NOTIFICATIONS);
   await persistStore();
   return item;
+}
+
+/**
+ * Returns notifications array trimmed so each email keeps at most
+ * `perEmailLimit` entries (newest first by createdAt). Prevents one
+ * noisy user (or promo broadcast fan-out) from evicting another
+ * user's notifications under the global MAX_NOTIFICATIONS cap.
+ *
+ * @param {Array<object>} notifications
+ * @param {number} perEmailLimit
+ * @returns {Array<object>}
+ */
+function trimNotificationsByEmail(notifications, perEmailLimit) {
+  const limit = Math.max(1, Math.round(Number(perEmailLimit) || 0));
+  if (!Array.isArray(notifications) || notifications.length === 0 || limit <= 0) {
+    return Array.isArray(notifications) ? notifications : [];
+  }
+  const counts = new Map();
+  const out = [];
+  for (const item of notifications) {
+    const email = normalizeEmail(item?.email);
+    if (!email) {
+      continue;
+    }
+    const seen = counts.get(email) || 0;
+    if (seen >= limit) {
+      continue;
+    }
+    counts.set(email, seen + 1);
+    out.push(item);
+  }
+  return out;
 }
 
 async function listKnownRewardRecipients() {
@@ -629,77 +693,79 @@ async function getRewardDashboard(email) {
 }
 
 async function claimJoiningBonus(email) {
-  ensureLoaded();
   const safeEmail = normalizeEmail(email);
   if (!safeEmail) {
     throw new Error("Valid email is required.");
   }
-  if (await isAdminEmail(safeEmail)) {
-    throw new Error("Admin accounts are not eligible for joining bonus.");
-  }
-  const now = Date.now();
-  const current = store.bonusProfiles[safeEmail] || {
-    firstSeenAt: now,
-    joiningClaimedAt: 0,
-    joiningBonusPaise: JOINING_BONUS_PAISE,
-    updatedAt: now
-  };
-  if (Number(current.joiningClaimedAt || 0) > 0) {
-    return {
-      claimed: false,
-      alreadyClaimed: true,
-      amountPaise: Math.max(0, Number(current.joiningBonusPaise) || JOINING_BONUS_PAISE),
-      claimedAt: Number(current.joiningClaimedAt) || 0
-    };
-  }
-
-  const rewardPaise = JOINING_BONUS_PAISE;
-  const credit = await creditWallet({
-    userId: safeEmail,
-    amountInr: rewardPaise / 100,
-    paymentId: `joining_bonus:${safeEmail}`,
-    source: "joining_bonus"
-  });
-  if (!credit?.applied && String(credit?.reason || "") !== "duplicate_payment") {
-    throw new Error("Unable to credit joining bonus.");
-  }
-
-  store.bonusProfiles[safeEmail] = {
-    ...current,
-    joiningClaimedAt: now,
-    joiningBonusPaise: rewardPaise,
-    updatedAt: now
-  };
-  for (const notification of store.notifications) {
-    if (notification.email === safeEmail && notification.kind === "joining_bonus_available") {
-      notification.read = true;
-      notification.readAt = Math.max(0, Number(notification.readAt || 0)) || now;
+  return withKeyedMutex(`claim-joining-bonus:${safeEmail}`, async () => {
+    ensureLoaded();
+    if (await isAdminEmail(safeEmail)) {
+      throw new Error("Admin accounts are not eligible for joining bonus.");
     }
-  }
-  await appendRewardEvent({
-    id: `joining_bonus:${safeEmail}`,
-    kind: "joining_bonus",
-    email: safeEmail,
-    creditedEmail: safeEmail,
-    amountPaise: rewardPaise,
-    note: "Joining bonus redeemed",
-    createdAt: now
+    const now = Date.now();
+    const current = store.bonusProfiles[safeEmail] || {
+      firstSeenAt: now,
+      joiningClaimedAt: 0,
+      joiningBonusPaise: JOINING_BONUS_PAISE,
+      updatedAt: now
+    };
+    if (Number(current.joiningClaimedAt || 0) > 0) {
+      return {
+        claimed: false,
+        alreadyClaimed: true,
+        amountPaise: Math.max(0, Number(current.joiningBonusPaise) || JOINING_BONUS_PAISE),
+        claimedAt: Number(current.joiningClaimedAt) || 0
+      };
+    }
+
+    const rewardPaise = JOINING_BONUS_PAISE;
+    const credit = await creditWallet({
+      userId: safeEmail,
+      amountInr: rewardPaise / 100,
+      paymentId: `joining_bonus:${safeEmail}`,
+      source: "joining_bonus"
+    });
+    if (!credit?.applied && String(credit?.reason || "") !== "duplicate_payment") {
+      throw new Error("Unable to credit joining bonus.");
+    }
+
+    store.bonusProfiles[safeEmail] = {
+      ...current,
+      joiningClaimedAt: now,
+      joiningBonusPaise: rewardPaise,
+      updatedAt: now
+    };
+    for (const notification of store.notifications) {
+      if (notification.email === safeEmail && notification.kind === "joining_bonus_available") {
+        notification.read = true;
+        notification.readAt = Math.max(0, Number(notification.readAt || 0)) || now;
+      }
+    }
+    await appendRewardEvent({
+      id: `joining_bonus:${safeEmail}`,
+      kind: "joining_bonus",
+      email: safeEmail,
+      creditedEmail: safeEmail,
+      amountPaise: rewardPaise,
+      note: "Joining bonus redeemed",
+      createdAt: now
+    });
+    await appendNotification({
+      email: safeEmail,
+      kind: "joining_bonus_claimed",
+      title: "Welcome bonus credited",
+      message: `Rs ${(rewardPaise / 100).toFixed(2)} welcome bonus credited to your wallet.`,
+      actionTarget: "bonus",
+      dedupeKey: `joining-bonus-claimed:${safeEmail}`
+    });
+    await persistStore();
+    return {
+      claimed: credit?.applied !== false,
+      alreadyClaimed: false,
+      amountPaise: rewardPaise,
+      claimedAt: now
+    };
   });
-  await appendNotification({
-    email: safeEmail,
-    kind: "joining_bonus_claimed",
-    title: "Welcome bonus credited",
-    message: `Rs ${(rewardPaise / 100).toFixed(2)} welcome bonus credited to your wallet.`,
-    actionTarget: "bonus",
-    dedupeKey: `joining-bonus-claimed:${safeEmail}`
-  });
-  await persistStore();
-  return {
-    claimed: credit?.applied !== false,
-    alreadyClaimed: false,
-    amountPaise: rewardPaise,
-    claimedAt: now
-  };
 }
 
 /**
@@ -778,7 +844,7 @@ async function upsertPromoCode(input, actorEmail = "") {
     note: toSafeString(input?.note, 220),
     usageLimit: type === "invite_bonus"
       ? 1
-      : Math.max(1, Math.min(5000, Math.round(Number(input?.usageLimit) || 1))),
+      : Math.max(1, Math.min(MAX_PROMO_REDEMPTIONS, Math.round(Number(input?.usageLimit) || 1))),
     valuePaise,
     percent,
     percentBasePaise,
@@ -1020,17 +1086,19 @@ async function listPromosForAdmin() {
  * @returns {Promise<object>}
  */
 async function redeemPromoCode(email, rawCode) {
-  ensureLoaded();
-
   const safeEmail = normalizeEmail(email);
   if (!safeEmail) {
     throw new Error("Valid email is required.");
   }
-
   const code = sanitizePromoCode(rawCode);
   if (!code || code.length < 4) {
     throw new Error("Enter a valid promo code.");
   }
+  return withKeyedMutex(`redeem-promo:${code}`, () => redeemPromoCodeImpl(safeEmail, code));
+}
+
+async function redeemPromoCodeImpl(safeEmail, code) {
+  ensureLoaded();
 
   const now = Date.now();
   const promo = normalizePromoRecord(store.promos[code], code);

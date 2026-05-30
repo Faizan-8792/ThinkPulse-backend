@@ -11,7 +11,8 @@
     "check:release": "node scripts/production_check.js",
     "check:env:production": "NODE_ENV=production node scripts/production_check.js --strict-env",
     "check:razorpay": "node scripts/razorpay_integration_check.js",
-    "check:razorpay:full": "node scripts/razorpay_integration_check.js --full=true"
+    "check:razorpay:full": "node scripts/razorpay_integration_check.js --full=true",
+    "admin:wipe-non-admins": "node scripts/delete_all_non_admins.js"
   },
   "engines": {
     "node": ">=20"

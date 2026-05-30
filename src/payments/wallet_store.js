@@ -274,7 +274,12 @@ function persistStore() {
       }
 
       await fs.promises.mkdir(path.dirname(walletStorePath), { recursive: true });
-      await fs.promises.writeFile(walletStorePath, snapshot, "utf8");
+      // Atomic write: stage to a sibling temp file then rename, so a crash
+      // mid-write cannot leave a truncated JSON file that ensureLoaded()
+      // would catch as a parse error and reset to empty (wiping wallets).
+      const tempPath = `${walletStorePath}.tmp-${process.pid}-${Date.now()}`;
+      await fs.promises.writeFile(tempPath, snapshot, "utf8");
+      await fs.promises.rename(tempPath, walletStorePath);
     })
     .catch((error) => {
       console.error("[wallet-store] Failed to persist wallet store:", error?.message || error);

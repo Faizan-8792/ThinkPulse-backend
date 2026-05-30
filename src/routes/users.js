@@ -25,6 +25,7 @@ const {
 } = require("../payments/wallet_store");
 const {
   ensureJoiningBonusAvailableNotification,
+  claimJoiningBonus,
   recordAdminWalletCredit,
   deleteRewardRecordsForEmail
 } = require("../rewards/rewards_store");
@@ -33,7 +34,8 @@ const {
   authenticateRequest,
   requireRole,
   requireSelfOrAdmin,
-  resolveTrustedRole
+  resolveTrustedRole,
+  invalidateAuthCacheForEmail
 } = require("../security/auth");
 const {
   createIdempotencyMiddleware
@@ -251,7 +253,37 @@ async function queueJoiningBonusForNewUser(email) {
     };
   }
 
-  return ensureJoiningBonusAvailableNotification(safeEmail);
+  // Auto-credit the joining bonus on first signup so the wallet is funded
+  // immediately. The user no longer needs to navigate to the bonus page
+  // and click claim; the welcome message becomes informational only.
+  // claimJoiningBonus is idempotent per-email and serialised with a mutex,
+  // so this stays safe even if the upsert is retried.
+  try {
+    const claim = await claimJoiningBonus(safeEmail);
+    if (claim?.alreadyClaimed) {
+      return {
+        autoClaimed: false,
+        alreadyClaimed: true,
+        amountPaise: Math.max(0, Number(claim?.amountPaise) || 0),
+        claimedAt: Math.max(0, Number(claim?.claimedAt) || 0)
+      };
+    }
+    return {
+      autoClaimed: true,
+      claimed: true,
+      amountPaise: Math.max(0, Number(claim?.amountPaise) || 0),
+      claimedAt: Math.max(0, Number(claim?.claimedAt) || Date.now())
+    };
+  } catch (error) {
+    // If the auto-claim fails (e.g. wallet store transient), fall back to
+    // queuing the welcome notification so the user can still claim manually.
+    const note = await ensureJoiningBonusAvailableNotification(safeEmail).catch(() => null);
+    return {
+      autoClaimed: false,
+      claimError: error?.message || "Unable to auto-claim joining bonus.",
+      ...(note || {})
+    };
+  }
 }
 
 const premiumApiEntrySchema = z.object({
@@ -807,6 +839,19 @@ router.post("/users/upsert", validateRequest({ body: userUpsertBodySchema }), as
   }
 });
 
+router.get("/admin/whoami", async (req, res) => {
+  // The /admin router prefix is already protected by requireRole("admin"),
+  // so reaching this handler proves the caller is a verified admin in the
+  // backend's view. Used by the admin SPA to gate UI rendering on backend
+  // authority instead of trusting locally-cached role state.
+  res.json({
+    ok: true,
+    email: normalizeEmail(req.user?.email || ""),
+    role: "admin",
+    plan: req.user?.plan || "admin"
+  });
+});
+
 router.get("/admin/users", async (_req, res) => {
   if (!isSupabaseConfigured()) {
     res.status(503).json({
@@ -869,6 +914,7 @@ router.post("/admin/users/set-plan", validateRequest({ body: adminSetPlanBodySch
     });
 
     const planState = await getUserPlanState({ userId: email });
+    invalidateAuthCacheForEmail(email);
     res.json({
       ok: true,
       email,
@@ -988,6 +1034,7 @@ router.post("/admin/users/credit-wallet", validateRequest({ body: adminCreditWal
         note,
         actorEmail
       }).catch(() => undefined);
+      invalidateAuthCacheForEmail(email);
     }
 
     res.json({
@@ -1040,6 +1087,7 @@ router.post("/admin/users/block", validateRequest({ body: adminBlockBodySchema }
       lastDeletedAt: previous?.status?.lastDeletedAt || 0
     });
 
+    invalidateAuthCacheForEmail(email);
     res.json({
       ok: true,
       email,
@@ -1115,6 +1163,7 @@ router.post("/admin/users/api-block", validateRequest({ body: adminBlockBodySche
       apiBlockNote: blocked ? note : ""
     });
 
+    invalidateAuthCacheForEmail(email);
     res.json({
       ok: true,
       email,
@@ -1141,67 +1190,168 @@ router.post("/admin/users/delete", validateRequest({ body: adminDeleteBodySchema
   }
 
   try {
-    const role = await resolveTrustedRole(email);
-    if (role === "admin") {
-      res.status(400).json({
+    const result = await deleteSingleUserCompletely(email, normalizeEmail(req.user?.email || ""));
+    if (!result.ok) {
+      res.status(result.status || 500).json({
         ok: false,
-        error: "Admin accounts cannot be deleted."
+        error: result.error || "Unable to delete user records."
       });
       return;
     }
-
-    const wallet = await deleteWalletSnapshot(email);
-    let payments = {
-      deleted: false,
-      count: 0,
-      reason: "Supabase is not configured."
-    };
-    let planReset = {
-      updated: false,
-      reason: "Supabase is not configured."
-    };
-
-    if (isSupabaseConfigured()) {
-      payments = await deleteUserPaymentRecords({ userId: email });
-      planReset = await setUserPlanState({
-        userId: email,
-        plan: "free"
-      });
-    }
-    const userState = await deleteAllUserStateConfigs(email);
-    const rewards = await deleteRewardRecordsForEmail(email).catch((error) => ({
-      ok: false,
-      error: error?.message || "Unable to delete reward records."
-    }));
-    const deletedAt = Date.now();
-    const accountStatus = await saveUserAccountStatus(email, {
-      status: "deleted",
-      deletedAt,
-      deletedByEmail: normalizeEmail(req.user?.email || ""),
-      apiBlocked: false,
-      apiBlockedAt: 0,
-      apiBlockedByEmail: "",
-      apiBlockNote: "",
-      note: "Deleted by admin"
-    }).catch(() => null);
-
+    invalidateAuthCacheForEmail(email);
     res.json({
       ok: true,
-      email,
-      wallet,
-      payments,
-      planReset,
-      userState,
-      rewards,
-      accountStatus: accountStatus?.status || normalizeAccountStatusRecord(email, {
-        status: "deleted",
-        deletedAt
-      })
+      ...result.payload
     });
   } catch (error) {
     res.status(500).json({
       ok: false,
       error: error?.message || "Unable to delete user records."
+    });
+  }
+});
+
+/**
+ * Wipes all stored state for one user. Used by /admin/users/delete and
+ * /admin/users/delete-all-non-admins. Refuses admin emails so an admin
+ * cannot be removed by mistake.
+ *
+ * @param {string} email
+ * @param {string} actorEmail
+ * @returns {Promise<{ok:boolean,status?:number,error?:string,payload?:object}>}
+ */
+async function deleteSingleUserCompletely(email, actorEmail) {
+  const safeEmail = normalizeEmail(email);
+  if (!safeEmail) {
+    return { ok: false, status: 400, error: "Valid email is required." };
+  }
+
+  const role = await resolveTrustedRole(safeEmail);
+  if (role === "admin") {
+    return { ok: false, status: 400, error: "Admin accounts cannot be deleted." };
+  }
+
+  const wallet = await deleteWalletSnapshot(safeEmail);
+  let payments = { deleted: false, count: 0, reason: "Supabase is not configured." };
+  let planReset = { updated: false, reason: "Supabase is not configured." };
+
+  if (isSupabaseConfigured()) {
+    payments = await deleteUserPaymentRecords({ userId: safeEmail });
+    planReset = await setUserPlanState({
+      userId: safeEmail,
+      plan: "free"
+    });
+  }
+
+  const userState = await deleteAllUserStateConfigs(safeEmail);
+  const rewards = await deleteRewardRecordsForEmail(safeEmail).catch((error) => ({
+    ok: false,
+    error: error?.message || "Unable to delete reward records."
+  }));
+
+  const deletedAt = Date.now();
+  const accountStatus = await saveUserAccountStatus(safeEmail, {
+    status: "deleted",
+    deletedAt,
+    deletedByEmail: actorEmail || "",
+    apiBlocked: false,
+    apiBlockedAt: 0,
+    apiBlockedByEmail: "",
+    apiBlockNote: "",
+    note: "Deleted by admin"
+  }).catch(() => null);
+
+  return {
+    ok: true,
+    payload: {
+      email: safeEmail,
+      wallet,
+      payments,
+      planReset,
+      userState,
+      rewards,
+      accountStatus: accountStatus?.status || normalizeAccountStatusRecord(safeEmail, {
+        status: "deleted",
+        deletedAt
+      })
+    }
+  };
+}
+
+/**
+ * Bulk-deletes every non-admin user known to the backend. Iterates the
+ * payments registry, resolves each email's role through the same trusted
+ * path used elsewhere, and skips admins. Used to reset the production
+ * database when needed (for example, after an early closed beta).
+ *
+ * Body: optional `confirm: true` flag is required to prevent accidental
+ *       invocation. The route is already gated behind requireRole("admin").
+ */
+router.post("/admin/users/delete-all-non-admins", async (req, res) => {
+  const confirm = Boolean(req.body?.confirm);
+  if (!confirm) {
+    res.status(400).json({
+      ok: false,
+      error: "Send { confirm: true } in the request body to authorise bulk delete."
+    });
+    return;
+  }
+
+  if (!isSupabaseConfigured()) {
+    res.status(503).json({
+      ok: false,
+      error: "Supabase is not configured on the server."
+    });
+    return;
+  }
+
+  try {
+    const actorEmail = normalizeEmail(req.user?.email || "");
+    const listed = await listKnownUsersFromPayments();
+    const all = Array.isArray(listed?.users) ? listed.users : [];
+
+    const summary = {
+      ok: true,
+      actorEmail,
+      considered: all.length,
+      deleted: 0,
+      skippedAdmins: 0,
+      failed: 0,
+      errors: []
+    };
+
+    // Sequential deletion to avoid hammering Supabase and to keep the
+    // wallet/rewards JSON file writes serialised behind their own queues.
+    for (const entry of all) {
+      const email = normalizeEmail(entry?.email || entry?.userId || entry?.user_id);
+      if (!email) {
+        continue;
+      }
+      const role = await resolveTrustedRole(email).catch(() => "user");
+      if (role === "admin") {
+        summary.skippedAdmins += 1;
+        continue;
+      }
+      try {
+        const outcome = await deleteSingleUserCompletely(email, actorEmail);
+        if (outcome.ok) {
+          summary.deleted += 1;
+          invalidateAuthCacheForEmail(email);
+        } else {
+          summary.failed += 1;
+          summary.errors.push({ email, error: outcome.error });
+        }
+      } catch (error) {
+        summary.failed += 1;
+        summary.errors.push({ email, error: error?.message || "Unknown error" });
+      }
+    }
+
+    res.json(summary);
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error?.message || "Unable to bulk-delete users."
     });
   }
 });

@@ -40,9 +40,10 @@ const GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo";
 const USER_ACCOUNT_STATUS_SETTING_PREFIX = "user_account_status:";
 
 /**
- * Hardcoded admin email addresses. These are always treated as admins
- * regardless of the plan state stored in the database. Additional admins
- * can be granted via the THINKPULSE_ADMIN_EMAILS / ADMIN_EMAILS env vars.
+ * Hardcoded admin email addresses kept for local-dev safety. Production
+ * deployments should grant admin via the THINKPULSE_ADMIN_EMAILS env var
+ * so the list can be rotated without a redeploy. A one-time startup
+ * warning is emitted when production relies on these defaults.
  */
 const DEFAULT_ADMIN_EMAILS = [
   "saifullahfaizan786@gmail.com",
@@ -94,6 +95,16 @@ const adminEmailSet = new Set([
   ...DEFAULT_ADMIN_EMAILS.map((value) => normalizeEmail(value)).filter(Boolean),
   ...parseEnvEmailList()
 ]);
+
+if (
+  String(process.env.NODE_ENV || "").trim().toLowerCase() === "production" &&
+  parseEnvEmailList().length === 0
+) {
+  console.warn(
+    "[auth] Production deployment is relying on the hardcoded DEFAULT_ADMIN_EMAILS list. " +
+      "Set THINKPULSE_ADMIN_EMAILS (or ADMIN_EMAILS) to manage admins via env config."
+  );
+}
 
 /**
  * Normalises an email address to lowercase and trims whitespace.
@@ -288,6 +299,10 @@ async function validateAccessToken(token) {
     throw new Error("Missing bearer token.");
   }
 
+  // Cache TTL is intentionally short so admin-driven plan/role changes
+  // (set-plan, set-role, block) propagate to in-flight clients quickly.
+  const cacheTtlMs = 5 * 1000;
+
   // Demo session tokens are HMAC-signed locally and verified without any
   // external network call. They must be checked first so they never hit the
   // Google userinfo endpoint.
@@ -300,7 +315,7 @@ async function validateAccessToken(token) {
     if (!identity) {
       throw new Error("Invalid or expired demo session token.");
     }
-    tokenValidationCache.set(safeToken, identity, 60 * 1000);
+    tokenValidationCache.set(safeToken, identity, cacheTtlMs);
     return identity;
   }
 
@@ -310,8 +325,42 @@ async function validateAccessToken(token) {
   }
 
   const identity = await fetchGoogleIdentity(safeToken);
-  tokenValidationCache.set(safeToken, identity, 60 * 1000);
+  tokenValidationCache.set(safeToken, identity, cacheTtlMs);
   return identity;
+}
+
+/**
+ * Removes a single token from the validation cache. Useful when an admin
+ * action invalidates the cached role/plan for a specific session.
+ *
+ * @param {string} token
+ */
+function invalidateAuthCacheForToken(token) {
+  const safeToken = String(token || "").trim();
+  if (!safeToken) {
+    return;
+  }
+  tokenValidationCache.delete(safeToken);
+}
+
+/**
+ * Drops every cached token-to-identity mapping for the given email so the
+ * next request re-resolves role/plan from Supabase. Called after admin
+ * writes (set-plan, set-role, block, credit-wallet) that change a user's
+ * effective entitlements.
+ *
+ * @param {string} email
+ */
+function invalidateAuthCacheForEmail(email) {
+  const safeEmail = normalizeEmail(email);
+  if (!safeEmail) {
+    return;
+  }
+  for (const [token, identity] of tokenValidationCache.entries()) {
+    if (normalizeEmail(identity?.email) === safeEmail) {
+      tokenValidationCache.delete(token);
+    }
+  }
 }
 
 function rejectAuthRequest(req, res, reason, statusCode = 401) {
@@ -434,5 +483,7 @@ module.exports = {
   requireRole,
   requireSelfOrAdmin,
   resolveTrustedRole,
-  normalizeEmail
+  normalizeEmail,
+  invalidateAuthCacheForEmail,
+  invalidateAuthCacheForToken
 };

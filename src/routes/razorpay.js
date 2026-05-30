@@ -97,6 +97,35 @@ function toSafeString(value, maxLength = 180) {
 }
 
 /**
+ * Returns a redacted email-like identifier for log lines. Keeps the first
+ * three characters of the local part plus the full domain so support can
+ * still correlate rows for one user without exposing the full PII string
+ * in operational logs.
+ *
+ * Examples:
+ *   "saifullah@gmail.com" -> "sai***@gmail.com"
+ *   "ab@example.com"      -> "a***@example.com"
+ *   "user_123"            -> "use***"
+ *
+ * @param {unknown} value
+ * @returns {string}
+ */
+function maskUserIdForLog(value) {
+  const safe = toSafeString(value, 180).toLowerCase();
+  if (!safe) {
+    return "";
+  }
+  const atIndex = safe.indexOf("@");
+  if (atIndex <= 0) {
+    return `${safe.slice(0, 3)}***`;
+  }
+  const local = safe.slice(0, atIndex);
+  const domain = safe.slice(atIndex);
+  const visible = local.length <= 3 ? local.slice(0, 1) : local.slice(0, 3);
+  return `${visible}***${domain}`;
+}
+
+/**
  * Returns first available user identifier from payload-like object.
  * @param {Record<string, unknown>|null|undefined} value
  * @returns {string}
@@ -1306,7 +1335,10 @@ async function razorpayWebhookHandler(req, res) {
       toSafeString(event?.created_at, 80)
     ].filter(Boolean).join("|"),
     occurredAtMs: toEpochMs(event?.created_at || 0),
-    maxAgeMs: 24 * 60 * 60 * 1000,
+    // Reject events older than 10 minutes to keep the replay window tight.
+    // The dedupe TTL stays at 24h so retries within one calendar day are
+    // still recognised as duplicates.
+    maxAgeMs: 10 * 60 * 1000,
     ttlMs: 24 * 60 * 60 * 1000
   });
   if (!razorpayReplay.ok) {
@@ -1354,7 +1386,7 @@ async function razorpayWebhookHandler(req, res) {
 
       if (trustedUser.mismatch) {
         console.warn(
-          `[razorpay-webhook] event=payment.captured user_mismatch=true notesUser=${toSafeString(notesUserId, 180).toLowerCase() || "na"} trackedUser=${toSafeString(trackedCandidate.transaction?.userId, 180).toLowerCase() || "na"}`
+          `[razorpay-webhook] event=payment.captured user_mismatch=true notesUser=${maskUserIdForLog(notesUserId) || "na"} trackedUser=${maskUserIdForLog(trackedCandidate.transaction?.userId) || "na"}`
         );
       }
 
@@ -1415,7 +1447,7 @@ async function razorpayWebhookHandler(req, res) {
       }
 
       console.info(
-        `[razorpay-webhook] event=payment.captured paymentId=${paymentId || "na"} orderId=${orderId || "na"} userId=${walletUserId || "na"} amountInr=${amountInr || 0} walletApplied=${wallet?.applied === true}`
+        `[razorpay-webhook] event=payment.captured paymentId=${paymentId || "na"} orderId=${orderId || "na"} userId=${maskUserIdForLog(walletUserId) || "na"} amountInr=${amountInr || 0} walletApplied=${wallet?.applied === true}`
       );
     } else if (eventType === "order.paid") {
       const order = event?.payload?.order?.entity || {};
@@ -1443,7 +1475,7 @@ async function razorpayWebhookHandler(req, res) {
 
       if (trustedUser.mismatch) {
         console.warn(
-          `[razorpay-webhook] event=order.paid user_mismatch=true notesUser=${toSafeString(notesUserId, 180).toLowerCase() || "na"} trackedUser=${toSafeString(trackedCandidate.transaction?.userId, 180).toLowerCase() || "na"}`
+          `[razorpay-webhook] event=order.paid user_mismatch=true notesUser=${maskUserIdForLog(notesUserId) || "na"} trackedUser=${maskUserIdForLog(trackedCandidate.transaction?.userId) || "na"}`
         );
       }
 
@@ -1504,7 +1536,7 @@ async function razorpayWebhookHandler(req, res) {
       }
 
       console.info(
-        `[razorpay-webhook] event=order.paid paymentId=${paymentId || "na"} orderId=${orderId || "na"} userId=${walletUserId || "na"} amountInr=${amountInr || 0} walletApplied=${wallet?.applied === true}`
+        `[razorpay-webhook] event=order.paid paymentId=${paymentId || "na"} orderId=${orderId || "na"} userId=${maskUserIdForLog(walletUserId) || "na"} amountInr=${amountInr || 0} walletApplied=${wallet?.applied === true}`
       );
     } else if (eventType === "payment.failed") {
       const payment = event?.payload?.payment?.entity || {};
@@ -1550,7 +1582,7 @@ async function razorpayWebhookHandler(req, res) {
       }
 
       console.warn(
-        `[razorpay-webhook] event=payment.failed paymentId=${paymentId || "na"} orderId=${orderId || "na"} userId=${toSafeString(userId, 180).toLowerCase() || "na"} amountInr=${amountInr || 0} reason=${failureCode}`
+        `[razorpay-webhook] event=payment.failed paymentId=${paymentId || "na"} orderId=${orderId || "na"} userId=${maskUserIdForLog(userId) || "na"} amountInr=${amountInr || 0} reason=${failureCode}`
       );
     } else {
       wallet = {

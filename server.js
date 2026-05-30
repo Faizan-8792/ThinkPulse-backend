@@ -311,7 +311,11 @@ app.use(cors({
       isChromeExtension &&
       (nodeEnv !== "production" || isConfiguredOrigin || chromeExtensionOrigins.includes(safeOrigin));
     const isPublicOrigin = Boolean(publicBaseOrigin && safeOrigin === publicBaseOrigin);
-    const isOpenDevCors = nodeEnv !== "production" && corsOrigins.length === 0;
+    // Only allow unconfigured origins on a local loopback dev backend. This
+    // prevents a staging deployment from accidentally accepting any browser
+    // origin if CORS_ORIGINS was forgotten.
+    const isLoopbackOrigin = /^(?:https?:)?\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i.test(safeOrigin);
+    const isOpenDevCors = nodeEnv !== "production" && corsOrigins.length === 0 && (!safeOrigin || isLoopbackOrigin);
     if (!safeOrigin || isConfiguredOrigin || isPublicOrigin || isAllowedChromeExtension || isOpenDevCors) {
       callback(null, true);
       return;
