@@ -828,8 +828,13 @@ router.post("/users/upsert", validateRequest({ body: userUpsertBodySchema }), as
       stored,
       isNewBackendUser,
       joiningBonus,
-      accountStatus: incomingAccountStatus,
-      activeAccountStatus: activatedStatus?.status || null
+      // accountStatus reflects the CURRENT (post-upsert) state. The
+      // incoming "deleted" state is exposed via wasDeleted so the
+      // frontend can run a one-time local purge without thinking the
+      // account is still deleted.
+      accountStatus: activatedStatus?.status || incomingAccountStatus,
+      activeAccountStatus: activatedStatus?.status || null,
+      wasDeleted: Boolean(incomingAccountStatus.deleted)
     });
   } catch (error) {
     res.status(500).json({
