@@ -718,11 +718,20 @@ async function claimJoiningBonus(email) {
       };
     }
 
+    // Use a paymentId that includes the bonus profile's firstSeenAt so a
+    // deleted-and-re-created user gets a fresh idempotency key. The admin
+    // delete flow wipes bonusProfiles[email], so the next signup creates a
+    // new firstSeenAt → new paymentId → wallet credit goes through. Without
+    // this, the stale processedPayments[joining_bonus:<email>] entry from
+    // any cached/replicated wallet store would silently mark the credit as
+    // a duplicate and the user would be left with a zero balance.
     const rewardPaise = JOINING_BONUS_PAISE;
+    const firstSeenAt = Math.max(0, Number(current.firstSeenAt) || now);
+    const paymentId = `joining_bonus:${safeEmail}:${firstSeenAt}`;
     const credit = await creditWallet({
       userId: safeEmail,
       amountInr: rewardPaise / 100,
-      paymentId: `joining_bonus:${safeEmail}`,
+      paymentId,
       source: "joining_bonus"
     });
     if (!credit?.applied && String(credit?.reason || "") !== "duplicate_payment") {
