@@ -18,7 +18,7 @@
       "actionTarget": "bonus",
       "code": "",
       "read": true,
-      "readAt": 1780128820174,
+      "readAt": 1780132304140,
       "createdAt": 1780126788027,
       "dedupeKey": "joining-bonus-claimed:admin@gmail.com"
     },
@@ -51,5 +51,5 @@
       "createdAt": 1780126785517
     }
   ],
-  "updatedAt": 1780128820174
+  "updatedAt": 1780132304140
 }
