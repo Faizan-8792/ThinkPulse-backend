@@ -38,24 +38,17 @@ function defaultUserKeyResolver(req) {
 function createGlobalIpRateLimiter() {
   return rateLimit({
     windowMs: 60 * 1000,
-    max: 100,
+    max: 300,
     standardHeaders: true,
     legacyHeaders: false,
     skip: (req) => {
       const path = String(req.path || "").trim();
-      return (
-        path === "/health" ||
-        path === "/health.json" ||
-        path === "/webhook" ||
-        path === "/webhooks" ||
-        path === "/stripe/webhook" ||
-        path.startsWith("/admin/")
-      );
+      return path === "/health" || path === "/health.json" || path === "/webhook" || path === "/webhooks" || path === "/stripe/webhook";
     },
     handler: (req, res) => {
       if (typeof req.logSecurity === "function") {
         req.logSecurity("rate_limit_ip_blocked", {
-          limit: 100,
+          limit: 300,
           windowMs: 60000
         }, "warn");
       } else {
@@ -63,7 +56,7 @@ function createGlobalIpRateLimiter() {
           ip: String(req.ip || req.socket?.remoteAddress || "").trim(),
           path: String(req.originalUrl || req.url || "").trim(),
           method: String(req.method || "").trim().toUpperCase(),
-          limit: 100,
+          limit: 300,
           windowMs: 60000
         }, "warn");
       }
