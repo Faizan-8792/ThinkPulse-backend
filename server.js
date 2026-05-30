@@ -29,6 +29,11 @@ const {
   requireRole
 } = require("./src/security/auth");
 const {
+  validateDemoCredentials,
+  issueDemoSessionToken,
+  DEFAULT_TOKEN_TTL_MS: DEMO_SESSION_DEFAULT_TTL_MS
+} = require("./src/security/demo_session");
+const {
   attachRequestContext,
   logSecurityEvent
 } = require("./src/security/logger");
@@ -525,6 +530,61 @@ app.post("/webhook", rawJsonWebhookParser, razorpayWebhookHandler);
 app.post("/webhooks", rawJsonWebhookParser, razorpayWebhookHandler);
 
 app.use(express.json({ limit: "8mb" }));
+
+/**
+ * Demo session credential exchange endpoint.
+ *
+ * Accepts an `{ email, password }` body, validates against the configured
+ * demo accounts, and returns a signed HMAC token that the extension uses as
+ * a Bearer token for subsequent authenticated requests.
+ *
+ * This allows pre-approved test accounts (used by Chrome Web Store reviewers
+ * and other automated environments where Google OAuth is unavailable) to
+ * persist reward state, billing state, and other user data on the backend
+ * exactly like a real Google-authenticated user.
+ */
+app.post("/auth/demo-session", (req, res) => {
+  const email = String(req.body?.email || "").trim().toLowerCase();
+  const password = String(req.body?.password || "");
+
+  const validation = validateDemoCredentials(email, password);
+  if (!validation.ok) {
+    logSecurityEvent("demo_session_rejected", {
+      claimedEmail: email
+    }, "warn");
+    res.status(401).json({
+      ok: false,
+      error: validation.error || "Invalid email or password."
+    });
+    return;
+  }
+
+  try {
+    const session = issueDemoSessionToken(validation.email, {
+      ttlMs: DEMO_SESSION_DEFAULT_TTL_MS
+    });
+    res.json({
+      ok: true,
+      token: session.token,
+      tokenType: "demo",
+      expiresAt: session.expiresAt,
+      issuedAt: session.issuedAt,
+      auth: {
+        email: validation.email,
+        role: "user"
+      }
+    });
+  } catch (error) {
+    logSecurityEvent("demo_session_issue_failed", {
+      claimedEmail: email,
+      reason: error?.message || "unknown_error"
+    }, "warn");
+    res.status(500).json({
+      ok: false,
+      error: "Unable to issue demo session token."
+    });
+  }
+});
 
 app.use("/", usersRouter);
 app.use("/", rewardsRouter);

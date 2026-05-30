@@ -26,6 +26,10 @@ const {
 const {
   logSecurityEvent
 } = require("./logger");
+const {
+  verifyDemoSessionToken,
+  looksLikeDemoSessionToken
+} = require("./demo_session");
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -251,10 +255,53 @@ async function fetchGoogleIdentity(token) {
   };
 }
 
+/**
+ * Resolves an identity record from a verified demo session token. Demo
+ * sessions always resolve to the regular "user" role to ensure reviewers
+ * experience the same feature set as a real end-user.
+ *
+ * @param {string} token
+ * @returns {Promise<object|null>}
+ */
+async function resolveDemoIdentity(token) {
+  const claims = verifyDemoSessionToken(token);
+  if (!claims) {
+    return null;
+  }
+
+  return {
+    email: claims.email,
+    role: "user",
+    plan: "user",
+    profileId: `demo_${claims.email}`,
+    fullName: "",
+    picture: "",
+    issuedAt: claims.issuedAt,
+    expiresAt: claims.expiresAt,
+    sessionType: "demo"
+  };
+}
+
 async function validateAccessToken(token) {
   const safeToken = String(token || "").trim();
   if (!safeToken) {
     throw new Error("Missing bearer token.");
+  }
+
+  // Demo session tokens are HMAC-signed locally and verified without any
+  // external network call. They must be checked first so they never hit the
+  // Google userinfo endpoint.
+  if (looksLikeDemoSessionToken(safeToken)) {
+    const cached = tokenValidationCache.get(safeToken);
+    if (cached) {
+      return cached;
+    }
+    const identity = await resolveDemoIdentity(safeToken);
+    if (!identity) {
+      throw new Error("Invalid or expired demo session token.");
+    }
+    tokenValidationCache.set(safeToken, identity, 60 * 1000);
+    return identity;
   }
 
   const cached = tokenValidationCache.get(safeToken);

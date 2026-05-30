@@ -140,7 +140,8 @@ const USER_STATE_NAMESPACE_ALLOWLIST = new Set([
   "account",
   "settings",
   "userapis",
-  "userocrapi"
+  "userocrapi",
+  "onboarding"
 ]);
 
 function parseJsonLikeValue(value) {

@@ -67,7 +67,8 @@ const USER_STATE_NAMESPACES = new Set([
   "account",
   "settings",
   "userapis",
-  "userocrapi"
+  "userocrapi",
+  "onboarding"
 ]);
 const USER_ACCOUNT_STATUS_SETTING_PREFIX = "user_account_status:";
 
@@ -299,7 +300,7 @@ function normalizePublicOcrApiEntry(entry, index = 0) {
 }
 
 const userStateParamsSchema = z.object({
-  namespace: z.enum(["billing", "account", "settings", "userapis", "userocrapi"]),
+  namespace: z.enum(["billing", "account", "settings", "userapis", "userocrapi", "onboarding"]),
   email: emailSchema
 });
 const userStateWriteSchema = z.object({

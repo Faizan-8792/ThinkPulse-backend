@@ -1,0 +1,55 @@
+{
+  "promos": {},
+  "bonusProfiles": {
+    "admin@gmail.com": {
+      "firstSeenAt": 1780126763601,
+      "joiningClaimedAt": 1780126785517,
+      "joiningBonusPaise": 2000,
+      "updatedAt": 1780126785517
+    }
+  },
+  "notifications": [
+    {
+      "id": "notification:1780126788027:tqvzlectmmc",
+      "email": "admin@gmail.com",
+      "kind": "joining_bonus_claimed",
+      "title": "Welcome bonus credited",
+      "message": "Rs 20.00 welcome bonus credited to your wallet.",
+      "actionTarget": "bonus",
+      "code": "",
+      "read": true,
+      "readAt": 1780128820174,
+      "createdAt": 1780126788027,
+      "dedupeKey": "joining-bonus-claimed:admin@gmail.com"
+    },
+    {
+      "id": "notification:1780126763601:khl56634rt",
+      "email": "admin@gmail.com",
+      "kind": "joining_bonus_available",
+      "title": "Welcome bonus ready",
+      "message": "Tap to open the bonus page and redeem your welcome credit. Wallet stays 0 until you claim it.",
+      "actionTarget": "bonus",
+      "code": "",
+      "read": true,
+      "readAt": 1780126785517,
+      "createdAt": 1780126763601,
+      "dedupeKey": "joining-bonus-available:admin@gmail.com"
+    }
+  ],
+  "notificationReceipts": {},
+  "rewardEvents": [
+    {
+      "id": "joining_bonus:admin@gmail.com",
+      "kind": "joining_bonus",
+      "email": "admin@gmail.com",
+      "actorEmail": "",
+      "creditedEmail": "admin@gmail.com",
+      "code": "",
+      "promoType": "",
+      "amountPaise": 2000,
+      "note": "Joining bonus redeemed",
+      "createdAt": 1780126785517
+    }
+  ],
+  "updatedAt": 1780128820174
+}
