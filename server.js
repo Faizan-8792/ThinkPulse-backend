@@ -215,8 +215,13 @@ const corsOrigins = String(process.env.CORS_ORIGINS || "")
   .split(",")
   .map((item) => item.trim())
   .filter(Boolean);
-const chromeExtensionOrigins = parseEnvList("CHROME_EXTENSION_ORIGINS", 50)
-  .filter((item) => item.startsWith("chrome-extension://"));
+const chromeExtensionOrigins = [
+  // Hardcoded published extension ID so CORS works immediately without
+  // requiring CHROME_EXTENSION_ORIGINS to be set in Azure App Settings.
+  // Once you configure the env var, this fallback is harmless (deduped).
+  "chrome-extension://blpflnaplofjigoilfedffpjcmpijjgm",
+  ...parseEnvList("CHROME_EXTENSION_ORIGINS", 50)
+].filter((item) => item.startsWith("chrome-extension://"));
 
 /**
  * Validates runtime environment for payment and webhook flows.
