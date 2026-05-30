@@ -9,6 +9,7 @@ const dotenv = require("dotenv");
 const backendRoot = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(backendRoot, "..");
 const frontendRoot = path.join(repoRoot, "frontend");
+const hasFrontend = fs.existsSync(path.join(frontendRoot, "manifest.json"));
 const args = new Set(process.argv.slice(2));
 const strictEnv = args.has("--strict-env") || String(process.env.NODE_ENV || "").trim().toLowerCase() === "production";
 const checks = [];
@@ -76,9 +77,11 @@ function checkNodeVersion() {
 
 function checkJsonFiles() {
   const files = [
-    path.join(backendRoot, "package.json"),
-    path.join(frontendRoot, "manifest.json")
+    path.join(backendRoot, "package.json")
   ];
+  if (hasFrontend) {
+    files.push(path.join(frontendRoot, "manifest.json"));
+  }
   for (const filePath of files) {
     try {
       readJson(filePath);
@@ -87,12 +90,15 @@ function checkJsonFiles() {
       fail("JSON parse", `${rel(filePath)} is invalid: ${error.message}`);
     }
   }
+  if (!hasFrontend) {
+    warn("JSON parse", "frontend/manifest.json not found (backend-only checkout). Skipping frontend checks.");
+  }
 }
 
 function checkJavaScriptSyntax() {
   const files = [
     ...walk(backendRoot, { exclude: ["node_modules"] }),
-    ...walk(frontendRoot, { exclude: ["node_modules", ".next", "assets"] })
+    ...(hasFrontend ? walk(frontendRoot, { exclude: ["node_modules", ".next", "assets"] }) : [])
   ].filter((filePath) => filePath.endsWith(".js"));
 
   let failures = 0;
@@ -275,8 +281,12 @@ function checkPackageScripts() {
 checkNodeVersion();
 checkJsonFiles();
 checkJavaScriptSyntax();
-checkManifest();
-checkRemoteExtensionAssets();
+if (hasFrontend) {
+  checkManifest();
+  checkRemoteExtensionAssets();
+} else {
+  warn("Extension manifest", "frontend/ not found (backend-only checkout). Skipping extension checks.");
+}
 checkEnvTemplate();
 checkPackageScripts();
 checkStrictProductionEnv();
