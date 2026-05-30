@@ -43,7 +43,14 @@ function createGlobalIpRateLimiter() {
     legacyHeaders: false,
     skip: (req) => {
       const path = String(req.path || "").trim();
-      return path === "/health" || path === "/health.json" || path === "/webhook" || path === "/webhooks" || path === "/stripe/webhook";
+      return (
+        path === "/health" ||
+        path === "/health.json" ||
+        path === "/webhook" ||
+        path === "/webhooks" ||
+        path === "/stripe/webhook" ||
+        path.startsWith("/admin/")
+      );
     },
     handler: (req, res) => {
       if (typeof req.logSecurity === "function") {
