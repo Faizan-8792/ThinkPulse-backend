@@ -674,7 +674,16 @@ async function getRewardDashboard(email) {
       return Number(right.updatedAt || 0) - Number(left.updatedAt || 0);
     });
   const promoHistory = store.rewardEvents
-    .filter((entry) => entry.email === safeEmail || entry.creditedEmail === safeEmail || entry.actorEmail === safeEmail)
+    .filter((entry) => {
+      // Only show events where the user actually received something.
+      // admin_create is an internal event — user sees the promo in their
+      // offers list, not in history. History entry appears only after redeem.
+      const kind = String(entry.kind || "").trim().toLowerCase();
+      if (kind === "admin_create") {
+        return false;
+      }
+      return entry.email === safeEmail || entry.creditedEmail === safeEmail || entry.actorEmail === safeEmail;
+    })
     .slice(0, 40);
 
   await persistStore();
