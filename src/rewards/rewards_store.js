@@ -3,7 +3,13 @@
 const fs = require("fs");
 const path = require("path");
 
-const { getUserPlanState, listKnownUsersFromPayments } = require("../payments/supabase_store");
+const {
+  getUserPlanState,
+  listKnownUsersFromPayments,
+  isConfigured: isSupabaseConfigured,
+  getGlobalJsonConfig,
+  upsertGlobalJsonConfig
+} = require("../payments/supabase_store");
 const { creditWallet } = require("../payments/wallet_store");
 const { resolveStorePath } = require("../storage/store_path");
 
@@ -13,6 +19,7 @@ const MAX_NOTIFICATIONS_PER_EMAIL = 200;
 const MAX_REWARD_EVENTS = 6000;
 const MAX_NOTIFICATION_RECEIPTS_PER_EMAIL = 600;
 const MAX_PROMO_REDEMPTIONS = 500;
+const REWARDS_STORE_CONFIG_KEY = "thinkpulse_rewards_store_v1";
 const rewardsStorePath = resolveStorePath(process.env.REWARDS_STORE_PATH, "rewards.json");
 
 /**
@@ -394,6 +401,26 @@ function ensureLoaded() {
     console.warn("[rewards-store] Failed to load rewards store:", error?.message || error);
     store = normalizeStorePayload(store);
   }
+  // Async: load from Supabase in background and merge if it has newer data.
+  if (isSupabaseConfigured()) {
+    getGlobalJsonConfig(REWARDS_STORE_CONFIG_KEY)
+      .then((remote) => {
+        if (remote?.found && remote.value && typeof remote.value === "object") {
+          const remoteStore = normalizeStorePayload(remote.value);
+          // Use whichever has more data (Supabase survives redeploys).
+          if (
+            (remoteStore.rewardEvents?.length || 0) > (store.rewardEvents?.length || 0) ||
+            (Object.keys(remoteStore.promos || {}).length > Object.keys(store.promos || {}).length) ||
+            (remoteStore.notifications?.length || 0) > (store.notifications?.length || 0)
+          ) {
+            store = remoteStore;
+          }
+        }
+      })
+      .catch((error) => {
+        console.warn("[rewards-store] Supabase background load failed:", error?.message || error);
+      });
+  }
 }
 
 function persistStore() {
@@ -403,12 +430,17 @@ function persistStore() {
     .catch(() => undefined)
     .then(async () => {
       await fs.promises.mkdir(path.dirname(rewardsStorePath), { recursive: true });
-      // Atomic write: stage to a sibling temp file then rename, so a crash
-      // mid-write cannot leave a truncated rewards.json that ensureLoaded()
-      // would catch as a parse error and reset to empty.
       const tempPath = `${rewardsStorePath}.tmp-${process.pid}-${Date.now()}`;
       await fs.promises.writeFile(tempPath, JSON.stringify(snapshot, null, 2), "utf8");
       await fs.promises.rename(tempPath, rewardsStorePath);
+      // Persist to Supabase so data survives Azure redeploys.
+      if (isSupabaseConfigured()) {
+        try {
+          await upsertGlobalJsonConfig(REWARDS_STORE_CONFIG_KEY, snapshot);
+        } catch (error) {
+          console.warn("[rewards-store] Supabase persist failed:", error?.message || error);
+        }
+      }
     });
   return persistQueue;
 }
