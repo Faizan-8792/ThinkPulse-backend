@@ -404,8 +404,12 @@ async function ensureLoaded() {
   loadPromise = (async () => {
     try {
       // Supabase is the source of truth — it survives Azure redeploys.
+      // Hard timeout so a slow Supabase doesn't block the entire server.
       if (isSupabaseConfigured()) {
-        const remote = await getGlobalJsonConfig(REWARDS_STORE_CONFIG_KEY);
+        const remote = await Promise.race([
+          getGlobalJsonConfig(REWARDS_STORE_CONFIG_KEY),
+          new Promise((resolve) => setTimeout(() => resolve(null), 8000))
+        ]);
         if (remote?.found && remote.value && typeof remote.value === "object") {
           store = normalizeStorePayload(remote.value);
           initialized = true;
