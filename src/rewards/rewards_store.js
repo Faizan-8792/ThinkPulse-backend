@@ -386,41 +386,50 @@ function normalizeStorePayload(value) {
   return next;
 }
 
-function ensureLoaded() {
+let loadPromise = null;
+
+/**
+ * Loads the rewards store from Supabase (primary, durable) or local file
+ * (fallback). This is async and MUST be awaited before any store access.
+ * All public functions call this first.
+ */
+async function ensureLoaded() {
   if (initialized) {
     return;
   }
-  initialized = true;
-  try {
-    if (fs.existsSync(rewardsStorePath)) {
-      store = normalizeStorePayload(JSON.parse(fs.readFileSync(rewardsStorePath, "utf8")));
-    } else {
+  if (loadPromise) {
+    await loadPromise;
+    return;
+  }
+  loadPromise = (async () => {
+    try {
+      // Supabase is the source of truth — it survives Azure redeploys.
+      if (isSupabaseConfigured()) {
+        const remote = await getGlobalJsonConfig(REWARDS_STORE_CONFIG_KEY);
+        if (remote?.found && remote.value && typeof remote.value === "object") {
+          store = normalizeStorePayload(remote.value);
+          initialized = true;
+          return;
+        }
+      }
+    } catch (error) {
+      console.warn("[rewards-store] Supabase load failed, falling back to file:", error?.message || error);
+    }
+    // Fallback: local file (only useful for local dev or first-ever boot).
+    try {
+      if (fs.existsSync(rewardsStorePath)) {
+        store = normalizeStorePayload(JSON.parse(fs.readFileSync(rewardsStorePath, "utf8")));
+      } else {
+        store = normalizeStorePayload(store);
+      }
+    } catch (error) {
+      console.warn("[rewards-store] File load failed:", error?.message || error);
       store = normalizeStorePayload(store);
     }
-  } catch (error) {
-    console.warn("[rewards-store] Failed to load rewards store:", error?.message || error);
-    store = normalizeStorePayload(store);
-  }
-  // Async: load from Supabase in background and merge if it has newer data.
-  if (isSupabaseConfigured()) {
-    getGlobalJsonConfig(REWARDS_STORE_CONFIG_KEY)
-      .then((remote) => {
-        if (remote?.found && remote.value && typeof remote.value === "object") {
-          const remoteStore = normalizeStorePayload(remote.value);
-          // Use whichever has more data (Supabase survives redeploys).
-          if (
-            (remoteStore.rewardEvents?.length || 0) > (store.rewardEvents?.length || 0) ||
-            (Object.keys(remoteStore.promos || {}).length > Object.keys(store.promos || {}).length) ||
-            (remoteStore.notifications?.length || 0) > (store.notifications?.length || 0)
-          ) {
-            store = remoteStore;
-          }
-        }
-      })
-      .catch((error) => {
-        console.warn("[rewards-store] Supabase background load failed:", error?.message || error);
-      });
-  }
+    initialized = true;
+  })();
+  await loadPromise;
+  loadPromise = null;
 }
 
 function persistStore() {
@@ -429,11 +438,7 @@ function persistStore() {
   persistQueue = persistQueue
     .catch(() => undefined)
     .then(async () => {
-      await fs.promises.mkdir(path.dirname(rewardsStorePath), { recursive: true });
-      const tempPath = `${rewardsStorePath}.tmp-${process.pid}-${Date.now()}`;
-      await fs.promises.writeFile(tempPath, JSON.stringify(snapshot, null, 2), "utf8");
-      await fs.promises.rename(tempPath, rewardsStorePath);
-      // Persist to Supabase so data survives Azure redeploys.
+      // Write to Supabase FIRST (durable, source of truth).
       if (isSupabaseConfigured()) {
         try {
           await upsertGlobalJsonConfig(REWARDS_STORE_CONFIG_KEY, snapshot);
@@ -441,12 +446,21 @@ function persistStore() {
           console.warn("[rewards-store] Supabase persist failed:", error?.message || error);
         }
       }
+      // Also write to local file (fast reads within same process lifetime).
+      try {
+        await fs.promises.mkdir(path.dirname(rewardsStorePath), { recursive: true });
+        const tempPath = `${rewardsStorePath}.tmp-${process.pid}-${Date.now()}`;
+        await fs.promises.writeFile(tempPath, JSON.stringify(snapshot, null, 2), "utf8");
+        await fs.promises.rename(tempPath, rewardsStorePath);
+      } catch (error) {
+        console.warn("[rewards-store] File persist failed:", error?.message || error);
+      }
     });
   return persistQueue;
 }
 
 async function appendRewardEvent(event) {
-  ensureLoaded();
+  await ensureLoaded();
   const stableId = toSafeString(event?.id, 80);
   if (stableId) {
     const existing = store.rewardEvents.find((item) => item.id === stableId);
@@ -473,7 +487,7 @@ async function appendRewardEvent(event) {
 }
 
 async function appendNotification(notification) {
-  ensureLoaded();
+  await ensureLoaded();
   const email = normalizeEmail(notification?.email);
   if (!email) {
     return null;
@@ -562,7 +576,7 @@ async function listKnownRewardRecipients() {
 }
 
 async function listNotifications(email, limit = 30) {
-  ensureLoaded();
+  await ensureLoaded();
   const safeEmail = normalizeEmail(email);
   const safeLimit = Math.max(1, Math.min(50, Math.round(Number(limit) || 30)));
   return store.notifications
@@ -572,7 +586,7 @@ async function listNotifications(email, limit = 30) {
 }
 
 async function markNotificationRead(email, id) {
-  ensureLoaded();
+  await ensureLoaded();
   const safeEmail = normalizeEmail(email);
   const safeId = toSafeString(id, 80);
   const notification = store.notifications.find((item) => item.email === safeEmail && item.id === safeId);
@@ -586,7 +600,7 @@ async function markNotificationRead(email, id) {
 }
 
 async function ensureJoiningBonusAvailableNotification(email) {
-  ensureLoaded();
+  await ensureLoaded();
   const safeEmail = normalizeEmail(email);
   if (!safeEmail) {
     throw new Error("Valid email is required.");
@@ -642,7 +656,7 @@ async function ensureJoiningBonusAvailableNotification(email) {
 }
 
 async function getRewardDashboard(email) {
-  ensureLoaded();
+  await ensureLoaded();
   const safeEmail = normalizeEmail(email);
   if (!safeEmail) {
     throw new Error("Valid email is required.");
@@ -761,7 +775,7 @@ async function claimJoiningBonus(email) {
     throw new Error("Valid email is required.");
   }
   return withKeyedMutex(`claim-joining-bonus:${safeEmail}`, async () => {
-    ensureLoaded();
+    await ensureLoaded();
     if (await isAdminEmail(safeEmail)) {
       throw new Error("Admin accounts are not eligible for joining bonus.");
     }
@@ -889,7 +903,7 @@ async function claimJoiningBonus(email) {
  * @returns {Promise<object>}
  */
 async function upsertPromoCode(input, actorEmail = "") {
-  ensureLoaded();
+  await ensureLoaded();
 
   const type = normalizePromoType(input?.type);
   const safeActorEmail = normalizeEmail(actorEmail);
@@ -1035,7 +1049,7 @@ async function upsertPromoCode(input, actorEmail = "") {
  * @returns {Promise<object>}
  */
 async function setPromoCodeStatus(rawCode, active) {
-  ensureLoaded();
+  await ensureLoaded();
   const code = sanitizePromoCode(rawCode);
   if (!code) {
     throw new Error("Promo code is required.");
@@ -1062,7 +1076,7 @@ async function setPromoCodeStatus(rawCode, active) {
  * @returns {Promise<{removedCount:number,clearedAt:number}>}
  */
 async function clearAllPromoCodes() {
-  ensureLoaded();
+  await ensureLoaded();
 
   const removedCount = Object.keys(store.promos || {}).length;
   store.promos = {};
@@ -1086,7 +1100,7 @@ async function clearAllPromoCodes() {
 }
 
 async function deleteRewardRecordsForEmail(email) {
-  ensureLoaded();
+  await ensureLoaded();
   const safeEmail = normalizeEmail(email);
   if (!safeEmail) {
     return {
@@ -1163,7 +1177,7 @@ async function deleteRewardRecordsForEmail(email) {
  * @returns {Promise<Array<object>>}
  */
 async function listPromosForAdmin() {
-  ensureLoaded();
+  await ensureLoaded();
   return Object.values(store.promos)
     .map((promo) => normalizePromoRecord(promo, promo?.code))
     .filter(Boolean)
@@ -1212,7 +1226,7 @@ async function redeemPromoCode(email, rawCode) {
 }
 
 async function redeemPromoCodeImpl(safeEmail, code) {
-  ensureLoaded();
+  await ensureLoaded();
 
   const now = Date.now();
   const promo = normalizePromoRecord(store.promos[code], code);
@@ -1372,7 +1386,7 @@ async function redeemPromoCodeImpl(safeEmail, code) {
  * @returns {Promise<void>}
  */
 async function recordAdminWalletCredit(payload) {
-  ensureLoaded();
+  await ensureLoaded();
 
   const email = normalizeEmail(payload?.email);
   const amountInr = normalizeInr(payload?.amountInr);
