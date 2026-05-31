@@ -253,35 +253,23 @@ async function queueJoiningBonusForNewUser(email) {
     };
   }
 
-  // Auto-credit the joining bonus on first signup so the wallet is funded
-  // immediately. The user no longer needs to navigate to the bonus page
-  // and click claim; the welcome message becomes informational only.
-  // claimJoiningBonus is idempotent per-email and serialised with a mutex,
-  // so this stays safe even if the upsert is retried.
+  // Do NOT auto-claim. The user must manually click "Claim" on the bonus
+  // page. We only create the "joining bonus available" notification so
+  // they know the reward is waiting.
   try {
-    const claim = await claimJoiningBonus(safeEmail);
-    if (claim?.alreadyClaimed) {
-      return {
-        autoClaimed: false,
-        alreadyClaimed: true,
-        amountPaise: Math.max(0, Number(claim?.amountPaise) || 0),
-        claimedAt: Math.max(0, Number(claim?.claimedAt) || 0)
-      };
-    }
-    return {
-      autoClaimed: true,
-      claimed: true,
-      amountPaise: Math.max(0, Number(claim?.amountPaise) || 0),
-      claimedAt: Math.max(0, Number(claim?.claimedAt) || Date.now())
-    };
-  } catch (error) {
-    // If the auto-claim fails (e.g. wallet store transient), fall back to
-    // queuing the welcome notification so the user can still claim manually.
     const note = await ensureJoiningBonusAvailableNotification(safeEmail).catch(() => null);
     return {
       autoClaimed: false,
-      claimError: error?.message || "Unable to auto-claim joining bonus.",
+      available: true,
+      amountPaise: JOINING_BONUS_PAISE,
       ...(note || {})
+    };
+  } catch (error) {
+    return {
+      autoClaimed: false,
+      available: true,
+      amountPaise: JOINING_BONUS_PAISE,
+      claimError: error?.message || "Unable to queue joining bonus notification."
     };
   }
 }
