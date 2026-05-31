@@ -29,7 +29,8 @@ const {
   validateRequest,
   safeString,
   optionalSafeString,
-  emailSchema
+  emailSchema,
+  optionalEmailSchema
 } = require("../security/validation");
 
 const router = express.Router();
@@ -81,7 +82,7 @@ const redeemPromoBodySchema = z.object({
 const promoUpsertBodySchema = z.object({
   code: optionalSafeString(24),
   type: optionalSafeString(40),
-  assignedToEmail: emailSchema.optional(),
+  assignedToEmail: optionalEmailSchema,
   valueInr: z.coerce.number().min(0).max(100000).optional(),
   percent: z.coerce.number().min(0).max(100).optional(),
   percentBaseInr: z.coerce.number().min(0).max(100000).optional(),
@@ -91,7 +92,7 @@ const promoUpsertBodySchema = z.object({
   expiresAt: optionalSafeString(80),
   allowSelfUse: z.boolean().optional(),
   active: z.boolean().optional(),
-  actorEmail: emailSchema.optional()
+  actorEmail: optionalEmailSchema
 }).passthrough();
 const promoStatusBodySchema = z.object({
   code: safeString(24),
