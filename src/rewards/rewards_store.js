@@ -690,8 +690,20 @@ async function getRewardDashboard(email) {
   return {
     billing,
     joiningBonus: {
-      eligible: resolvedRole !== "admin" && !Number(bonusProfile.joiningClaimedAt || 0),
-      claimed: Boolean(Number(bonusProfile.joiningClaimedAt || 0)),
+      // A user is eligible only if they haven't claimed AND the wallet
+      // doesn't already have a joining_bonus credit (covers edge cases
+      // where bonusProfiles was reset but the wallet credit exists).
+      eligible: resolvedRole !== "admin" &&
+        !Number(bonusProfile.joiningClaimedAt || 0) &&
+        !store.rewardEvents.some((ev) =>
+          ev.email === safeEmail && String(ev.kind || "").toLowerCase() === "joining_bonus"
+        ),
+      claimed: Boolean(
+        Number(bonusProfile.joiningClaimedAt || 0) ||
+        store.rewardEvents.some((ev) =>
+          ev.email === safeEmail && String(ev.kind || "").toLowerCase() === "joining_bonus"
+        )
+      ),
       amountPaise: Math.max(0, Number(bonusProfile.joiningBonusPaise) || JOINING_BONUS_PAISE),
       claimedAt: Math.max(0, Number(bonusProfile.joiningClaimedAt) || 0)
     },
@@ -724,6 +736,28 @@ async function claimJoiningBonus(email) {
         alreadyClaimed: true,
         amountPaise: Math.max(0, Number(current.joiningBonusPaise) || JOINING_BONUS_PAISE),
         claimedAt: Number(current.joiningClaimedAt) || 0
+      };
+    }
+    // Secondary guard: if rewardEvents already has a joining_bonus entry for
+    // this user (e.g. bonusProfiles was reset but the credit went through),
+    // treat it as already claimed.
+    const existingEvent = store.rewardEvents.find((ev) =>
+      ev.email === safeEmail && String(ev.kind || "").toLowerCase() === "joining_bonus"
+    );
+    if (existingEvent) {
+      // Repair the bonusProfile so future checks are fast.
+      store.bonusProfiles[safeEmail] = {
+        ...current,
+        joiningClaimedAt: Number(existingEvent.createdAt) || now,
+        joiningBonusPaise: Math.max(0, Number(existingEvent.amountPaise) || JOINING_BONUS_PAISE),
+        updatedAt: now
+      };
+      await persistStore();
+      return {
+        claimed: false,
+        alreadyClaimed: true,
+        amountPaise: Math.max(0, Number(existingEvent.amountPaise) || JOINING_BONUS_PAISE),
+        claimedAt: Number(existingEvent.createdAt) || now
       };
     }
 
