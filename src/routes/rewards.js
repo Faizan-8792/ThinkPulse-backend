@@ -135,15 +135,6 @@ router.use(
     max: 5,
     keyResolver: (req) => String(req.user?.email || "").trim().toLowerCase(),
     message: "Too many promo redemption attempts. Please slow down."
-  }),
-  createIdempotencyMiddleware({
-    scope: "promo_redeem",
-    ttlMs: 10 * 60 * 1000,
-    deriveKey: (req) => {
-      const email = String(req.user?.email || "").trim().toLowerCase();
-      const code = sanitizePromoCode(req.body?.code);
-      return `${email}:${code}`;
-    }
   })
 );
 
