@@ -1172,7 +1172,7 @@ async function redeemPromoCodeImpl(safeEmail, code) {
     notificationMessage = `${safeEmail} used your invite code ${code}. Reward credited to wallet.`;
     resultMode = "invite_owner";
   } else if (promo.assignedToEmail && promo.assignedToEmail !== safeEmail) {
-    throw new Error("This promo code is assigned to a different user.");
+    throw new Error("Promo code not found.");
   }
 
   const credit = await creditWallet({
