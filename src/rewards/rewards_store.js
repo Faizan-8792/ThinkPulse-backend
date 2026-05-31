@@ -1115,7 +1115,7 @@ async function redeemPromoCodeImpl(safeEmail, code) {
     throw new Error("Promo code not found.");
   }
   if (!promo.active) {
-    throw new Error("This promo code is inactive.");
+    throw new Error("Promo code not found.");
   }
   if (Number(promo.expiresAt || 0) > 0 && Number(promo.expiresAt) <= now) {
     promo.active = false;
