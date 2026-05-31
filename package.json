@@ -9,6 +9,8 @@
     "dev": "node server.js",
     "test": "npm run check:release",
     "check:release": "node scripts/production_check.js",
+    "check:billing": "node scripts/billing_functional_check.js",
+    "check:e2e": "node scripts/e2e_security_and_lifecycle_check.js",
     "check:env:production": "NODE_ENV=production node scripts/production_check.js --strict-env",
     "check:razorpay": "node scripts/razorpay_integration_check.js",
     "check:razorpay:full": "node scripts/razorpay_integration_check.js --full=true",
