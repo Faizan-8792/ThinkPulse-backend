@@ -10,7 +10,7 @@ const {
   getGlobalJsonConfig,
   upsertGlobalJsonConfig
 } = require("../payments/supabase_store");
-const { creditWallet } = require("../payments/wallet_store");
+const { creditWallet, hasJoiningBonusPayment } = require("../payments/wallet_store");
 const { resolveStorePath } = require("../storage/store_path");
 
 const JOINING_BONUS_PAISE = 2000;
@@ -719,23 +719,33 @@ async function getRewardDashboard(email) {
     .slice(0, 40);
 
   await persistStore();
+
+  // Determine joining bonus state using multiple sources of truth:
+  // 1. bonusProfiles[email].joiningClaimedAt (primary, but can be lost on redeploy)
+  // 2. rewardEvents with kind=joining_bonus (secondary)
+  // 3. wallet processedPayments with joining_bonus:email:* key (ultimate, persisted in Supabase)
+  const joiningClaimedFromProfile = Number(bonusProfile.joiningClaimedAt || 0) > 0;
+  const joiningClaimedFromEvents = store.rewardEvents.some((ev) =>
+    ev.email === safeEmail && String(ev.kind || "").toLowerCase() === "joining_bonus"
+  );
+  const joiningClaimedFromWallet = await hasJoiningBonusPayment(safeEmail).catch(() => false);
+  const joiningAlreadyClaimed = joiningClaimedFromProfile || joiningClaimedFromEvents || joiningClaimedFromWallet;
+
+  // Auto-repair bonusProfile if wallet proves the bonus was claimed but profile lost it.
+  if (joiningAlreadyClaimed && !joiningClaimedFromProfile) {
+    store.bonusProfiles[safeEmail] = {
+      ...bonusProfile,
+      joiningClaimedAt: bonusProfile.joiningClaimedAt || Date.now(),
+      updatedAt: Date.now()
+    };
+    await persistStore();
+  }
+
   return {
     billing,
     joiningBonus: {
-      // A user is eligible only if they haven't claimed AND the wallet
-      // doesn't already have a joining_bonus credit (covers edge cases
-      // where bonusProfiles was reset but the wallet credit exists).
-      eligible: resolvedRole !== "admin" &&
-        !Number(bonusProfile.joiningClaimedAt || 0) &&
-        !store.rewardEvents.some((ev) =>
-          ev.email === safeEmail && String(ev.kind || "").toLowerCase() === "joining_bonus"
-        ),
-      claimed: Boolean(
-        Number(bonusProfile.joiningClaimedAt || 0) ||
-        store.rewardEvents.some((ev) =>
-          ev.email === safeEmail && String(ev.kind || "").toLowerCase() === "joining_bonus"
-        )
-      ),
+      eligible: resolvedRole !== "admin" && !joiningAlreadyClaimed,
+      claimed: joiningAlreadyClaimed,
       amountPaise: Math.max(0, Number(bonusProfile.joiningBonusPaise) || JOINING_BONUS_PAISE),
       claimedAt: Math.max(0, Number(bonusProfile.joiningClaimedAt) || 0)
     },
@@ -790,6 +800,26 @@ async function claimJoiningBonus(email) {
         alreadyClaimed: true,
         amountPaise: Math.max(0, Number(existingEvent.amountPaise) || JOINING_BONUS_PAISE),
         claimedAt: Number(existingEvent.createdAt) || now
+      };
+    }
+
+    // Ultimate guard: check wallet processedPayments (persisted in Supabase,
+    // survives all redeploys). If the wallet already has a joining_bonus
+    // payment for this user, the bonus was credited — just repair the profile.
+    const walletHasBonus = await hasJoiningBonusPayment(safeEmail).catch(() => false);
+    if (walletHasBonus) {
+      store.bonusProfiles[safeEmail] = {
+        ...current,
+        joiningClaimedAt: now,
+        joiningBonusPaise: JOINING_BONUS_PAISE,
+        updatedAt: now
+      };
+      await persistStore();
+      return {
+        claimed: false,
+        alreadyClaimed: true,
+        amountPaise: JOINING_BONUS_PAISE,
+        claimedAt: now
       };
     }
 

@@ -450,8 +450,30 @@ async function deleteWalletSnapshot(userId) {
   };
 }
 
+/**
+ * Checks if a joining_bonus payment was already processed for this user.
+ * Used as a durable guard — wallet store is persisted in Supabase and
+ * survives Azure redeploys even when rewards.json is reset.
+ * @param {string} userId
+ * @returns {Promise<boolean>}
+ */
+async function hasJoiningBonusPayment(userId) {
+  await ensureLoaded();
+  const safeUserId = normalizeUserId(userId);
+  if (!safeUserId) {
+    return false;
+  }
+  for (const paymentId of Object.keys(store.processedPayments || {})) {
+    if (paymentId.startsWith(`joining_bonus:${safeUserId}:`)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 module.exports = {
   creditWallet,
   getWalletSnapshot,
-  deleteWalletSnapshot
+  deleteWalletSnapshot,
+  hasJoiningBonusPayment
 };
