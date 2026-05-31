@@ -245,8 +245,105 @@ async function runScenarios() {
   const { local } = installChromeStorageShim();
   installBootstrapFetchShim();
 
+  // ─── PHASE 0: ONE-TIME SECURITY PURGE MIGRATION ────────────────────
+  // Pre-seed chrome.storage.local with the exact leak shape produced by
+  // the legacy build (raw bootstrap keys, fzn::-encoded admin pool,
+  // and managed Tavily/Serper keys leaked into settings) and confirm
+  // the purge wipes all of it on first init.
+  const LEGACY_TAVILY = "tvly-dev-pTSgg-LEGACY-LEAK-1";
+  const LEGACY_SERPER = "serper-LEGACY-LEAK-1";
+  const fznEncode = (s) => `fzn::${Buffer.from(s, "utf8").toString("base64")}`;
+  await chrome.storage.local.set({
+    adminApis: {
+      openrouter: [fznEncode("sk-or-v1-LEGACY-LEAK")],
+      gemini: [fznEncode("AIzaLEGACY-LEAK")],
+      deepseek: { key: fznEncode("sk-LEGACY-DEEPSEEK"), endpoint: "x", model: "x" },
+      qwen: { key: fznEncode("nvapi-LEGACY-QWEN"), endpoint: "x", model: "x" },
+      llamaPrimary: { key: fznEncode("nvapi-LEGACY-LLAMA"), endpoint: "x", model: "x" },
+      vision: { key: fznEncode("nvapi-LEGACY-VISION"), endpoint: "x", model: "x" },
+      imageGen: { key: fznEncode("nvapi-LEGACY-IMG"), endpoint: "x", model: "x" },
+      ocr: {
+        ocrspace: { key: fznEncode("K87519674788957"), endpoint: "x" },
+        nvidia: { key: fznEncode("nvapi-LEGACY-OCR"), endpoint: "x", model: "x" }
+      },
+      asr: { key: fznEncode("nvapi-LEGACY-ASR"), endpoint: "x", model: "x" }
+    },
+    remoteBootstrapConfigV1: {
+      fetchedAt: Date.now(),
+      data: {
+        adminPool: {
+          openrouter: ["sk-or-v1-LEGACY-LEAK-RAW"],
+          gemini: ["AIzaLEGACY-LEAK-RAW"],
+          deepseek: { key: "sk-LEGACY-RAW", endpoint: "x", model: "x" },
+          qwen: { key: "nvapi-LEGACY-QWEN-RAW", endpoint: "x", model: "x" },
+          llamaPrimary: { key: "nvapi-LEGACY-LLAMA-RAW", endpoint: "x", model: "x" },
+          vision: { key: "nvapi-LEGACY-VISION-RAW", endpoint: "x", model: "x" },
+          imageGen: { key: "nvapi-LEGACY-IMG-RAW", endpoint: "x", model: "x" },
+          ocr: {
+            ocrspace: { key: "K87519674788957", endpoint: "x" },
+            nvidia: { key: "nvapi-LEGACY-OCR-RAW", endpoint: "x", model: "x" }
+          },
+          asr: { key: "nvapi-LEGACY-ASR-RAW", endpoint: "x", model: "x" }
+        },
+        webSearchDefaults: {
+          tavily: [LEGACY_TAVILY],
+          serper: [LEGACY_SERPER]
+        }
+      }
+    },
+    settings: {
+      theme: "light",
+      apiMode: "multiple",
+      backendBaseUrl: "https://thinkpulse-api-cpdre8hrencgaagx.centralindia-01.azurewebsites.net",
+      webSearchTavilyKeys: [fznEncode(LEGACY_TAVILY)],
+      webSearchSerperKeys: [fznEncode(LEGACY_SERPER)],
+      webSearchApiKey: fznEncode(LEGACY_TAVILY)
+    }
+  });
+
   const sm = await loadStorageManager();
   const { StorageManager } = sm;
+
+  // First call into storage triggers ensureDefaults which runs the purge.
+  await StorageManager.init();
+
+  const purgeSnapshot = await dumpDiskSnapshot(local);
+  const purgeLeak = deepStringContainsAny(purgeSnapshot, [
+    "LEGACY-LEAK", "LEGACY-DEEPSEEK", "LEGACY-RAW", "LEGACY-QWEN",
+    "LEGACY-LLAMA", "LEGACY-VISION", "LEGACY-IMG", "LEGACY-OCR",
+    "LEGACY-ASR", "K87519674788957", "tvly-dev-pTSgg",
+    "serper-LEGACY", "nvapi-LEGACY", "sk-or-v1-LEGACY", "AIzaLEGACY"
+  ]);
+  assertTrue(
+    "[MIGRATE] one-time purge removes ALL legacy leaks",
+    purgeLeak === null,
+    purgeLeak ? `still leaks="${purgeLeak}"` : "all clean"
+  );
+  assertEqual(
+    "[MIGRATE] adminApis purged",
+    Object.prototype.hasOwnProperty.call(purgeSnapshot, "adminApis"),
+    false
+  );
+  assertEqual(
+    "[MIGRATE] settings.webSearchTavilyKeys cleared",
+    Array.isArray(purgeSnapshot.settings?.webSearchTavilyKeys) && purgeSnapshot.settings.webSearchTavilyKeys.length,
+    0
+  );
+  assertEqual(
+    "[MIGRATE] settings.webSearchSerperKeys cleared",
+    Array.isArray(purgeSnapshot.settings?.webSearchSerperKeys) && purgeSnapshot.settings.webSearchSerperKeys.length,
+    0
+  );
+  assertEqual(
+    "[MIGRATE] settings.webSearchApiKey cleared",
+    String(purgeSnapshot.settings?.webSearchApiKey || ""),
+    ""
+  );
+  assertEqual(
+    "[MIGRATE] purge marker set",
+    Boolean(purgeSnapshot.thinkpulseStorageKeyPurgeV2),
+    true
+  );
 
   // ─── PHASE 1: SECURITY ─────────────────────────────────────────────
   // Trigger ensureDefaults via getSettings(), which fetches the bootstrap.
