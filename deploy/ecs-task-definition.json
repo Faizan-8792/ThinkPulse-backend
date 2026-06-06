@@ -1,0 +1,85 @@
+{
+  "family": "thinkpulse-backend",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "runtimePlatform": {
+    "cpuArchitecture": "X86_64",
+    "operatingSystemFamily": "LINUX"
+  },
+  "executionRoleArn": "arn:aws:iam::478728045812:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::478728045812:role/ecsTaskExecutionRole",
+  "containerDefinitions": [
+    {
+      "name": "thinkpulse-backend",
+      "image": "478728045812.dkr.ecr.us-east-1.amazonaws.com/thinkpulse-backend:latest",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 8080,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        { "name": "NODE_ENV", "value": "production" },
+        { "name": "MODE", "value": "live" },
+        { "name": "PORT", "value": "8080" },
+        { "name": "PUBLIC_BASE_URL", "value": "REPLACE_WITH_PUBLIC_URL" },
+        { "name": "CORS_ORIGINS", "value": "chrome-extension://blpflnaplofjigoilfedffpjcmpijjgm" },
+        { "name": "CHROME_EXTENSION_ORIGINS", "value": "chrome-extension://blpflnaplofjigoilfedffpjcmpijjgm" },
+        { "name": "STRIPE_STATEMENT_DESCRIPTOR", "value": "THINKPULSE" },
+        { "name": "ADMIN_DEEPSEEK_ENDPOINT", "value": "https://integrate.api.nvidia.com/v1/chat/completions" },
+        { "name": "ADMIN_QWEN_ENDPOINT", "value": "https://integrate.api.nvidia.com/v1/chat/completions" },
+        { "name": "ADMIN_LLAMA_PRIMARY_ENDPOINT", "value": "https://integrate.api.nvidia.com/v1/chat/completions" },
+        { "name": "ADMIN_VISION_ENDPOINT", "value": "https://integrate.api.nvidia.com/v1/chat/completions" },
+        { "name": "ADMIN_IMAGE_GEN_ENDPOINT", "value": "https://integrate.api.nvidia.com/v1/images/generations" },
+        { "name": "ADMIN_OCRSPACE_ENDPOINT", "value": "https://api.ocr.space/parse/image" },
+        { "name": "ADMIN_NVIDIA_OCR_ENDPOINT", "value": "https://integrate.api.nvidia.com/v1/ocr" },
+        { "name": "ADMIN_NVIDIA_OCR_MODEL", "value": "nemoretriever-ocr-v1" },
+        { "name": "ADMIN_ASR_ENDPOINT", "value": "https://integrate.api.nvidia.com/v1/audio/transcriptions" },
+        { "name": "ADMIN_ASR_MODEL", "value": "ai-parakeet-ctc-1.1b-asr" }
+      ],
+      "secrets": [
+        { "name": "RAZORPAY_KEY_ID", "valueFrom": "arn:aws:secretsmanager:us-east-1:478728045812:secret:thinkpulse/backend:RAZORPAY_KEY_ID::" },
+        { "name": "RAZORPAY_KEY_SECRET", "valueFrom": "arn:aws:secretsmanager:us-east-1:478728045812:secret:thinkpulse/backend:RAZORPAY_KEY_SECRET::" },
+        { "name": "RAZORPAY_WEBHOOK_SECRET", "valueFrom": "arn:aws:secretsmanager:us-east-1:478728045812:secret:thinkpulse/backend:RAZORPAY_WEBHOOK_SECRET::" },
+        { "name": "SUPABASE_URL", "valueFrom": "arn:aws:secretsmanager:us-east-1:478728045812:secret:thinkpulse/backend:SUPABASE_URL::" },
+        { "name": "SUPABASE_SERVICE_ROLE_KEY", "valueFrom": "arn:aws:secretsmanager:us-east-1:478728045812:secret:thinkpulse/backend:SUPABASE_SERVICE_ROLE_KEY::" },
+        { "name": "THINKPULSE_API_KEY_ENCRYPTION_SECRET", "valueFrom": "arn:aws:secretsmanager:us-east-1:478728045812:secret:thinkpulse/backend:THINKPULSE_API_KEY_ENCRYPTION_SECRET::" },
+        { "name": "DEMO_SESSION_SECRET", "valueFrom": "arn:aws:secretsmanager:us-east-1:478728045812:secret:thinkpulse/backend:DEMO_SESSION_SECRET::" },
+        { "name": "ADMIN_OPENROUTER_KEYS", "valueFrom": "arn:aws:secretsmanager:us-east-1:478728045812:secret:thinkpulse/backend:ADMIN_OPENROUTER_KEYS::" },
+        { "name": "ADMIN_GEMINI_KEYS", "valueFrom": "arn:aws:secretsmanager:us-east-1:478728045812:secret:thinkpulse/backend:ADMIN_GEMINI_KEYS::" },
+        { "name": "ADMIN_DEEPSEEK_KEY", "valueFrom": "arn:aws:secretsmanager:us-east-1:478728045812:secret:thinkpulse/backend:ADMIN_DEEPSEEK_KEY::" },
+        { "name": "ADMIN_QWEN_KEY", "valueFrom": "arn:aws:secretsmanager:us-east-1:478728045812:secret:thinkpulse/backend:ADMIN_QWEN_KEY::" },
+        { "name": "ADMIN_LLAMA_PRIMARY_KEY", "valueFrom": "arn:aws:secretsmanager:us-east-1:478728045812:secret:thinkpulse/backend:ADMIN_LLAMA_PRIMARY_KEY::" },
+        { "name": "ADMIN_VISION_KEY", "valueFrom": "arn:aws:secretsmanager:us-east-1:478728045812:secret:thinkpulse/backend:ADMIN_VISION_KEY::" },
+        { "name": "ADMIN_IMAGE_GEN_KEY", "valueFrom": "arn:aws:secretsmanager:us-east-1:478728045812:secret:thinkpulse/backend:ADMIN_IMAGE_GEN_KEY::" },
+        { "name": "ADMIN_OCRSPACE_KEY", "valueFrom": "arn:aws:secretsmanager:us-east-1:478728045812:secret:thinkpulse/backend:ADMIN_OCRSPACE_KEY::" },
+        { "name": "ADMIN_NVIDIA_OCR_KEY", "valueFrom": "arn:aws:secretsmanager:us-east-1:478728045812:secret:thinkpulse/backend:ADMIN_NVIDIA_OCR_KEY::" },
+        { "name": "ADMIN_ASR_KEY", "valueFrom": "arn:aws:secretsmanager:us-east-1:478728045812:secret:thinkpulse/backend:ADMIN_ASR_KEY::" },
+        { "name": "SUPERIOR_LLM_API", "valueFrom": "arn:aws:secretsmanager:us-east-1:478728045812:secret:thinkpulse/backend:SUPERIOR_LLM_API::" },
+        { "name": "NVIDIA_DEEPSEEK_API", "valueFrom": "arn:aws:secretsmanager:us-east-1:478728045812:secret:thinkpulse/backend:NVIDIA_DEEPSEEK_API::" },
+        { "name": "DEFAULT_TAVILY_SEARCH_KEYS", "valueFrom": "arn:aws:secretsmanager:us-east-1:478728045812:secret:thinkpulse/backend:DEFAULT_TAVILY_SEARCH_KEYS::" },
+        { "name": "DEFAULT_SERPER_SEARCH_KEYS", "valueFrom": "arn:aws:secretsmanager:us-east-1:478728045812:secret:thinkpulse/backend:DEFAULT_SERPER_SEARCH_KEYS::" },
+        { "name": "THINKPULSE_ADMIN_EMAILS", "valueFrom": "arn:aws:secretsmanager:us-east-1:478728045812:secret:thinkpulse/backend:THINKPULSE_ADMIN_EMAILS::" }
+      ],
+      "healthCheck": {
+        "command": ["CMD-SHELL", "node -e \"require('http').get({host:'127.0.0.1',port:process.env.PORT||8080,path:'/health.json'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))\""],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 20
+      },
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/thinkpulse-backend",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs",
+          "awslogs-create-group": "true"
+        }
+      }
+    }
+  ]
+}

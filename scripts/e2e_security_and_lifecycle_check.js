@@ -294,7 +294,7 @@ async function runScenarios() {
     settings: {
       theme: "light",
       apiMode: "multiple",
-      backendBaseUrl: "https://thinkpulse-api-cpdre8hrencgaagx.centralindia-01.azurewebsites.net",
+      backendBaseUrl: "https://th-2730cdd91ed4425fbfeef577240f9559.ecs.us-east-1.on.aws",
       webSearchTavilyKeys: [fznEncode(LEGACY_TAVILY)],
       webSearchSerperKeys: [fznEncode(LEGACY_SERPER)],
       webSearchApiKey: fznEncode(LEGACY_TAVILY)

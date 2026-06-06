@@ -372,7 +372,7 @@ npm run check:env:production
 Use these in popup/background scripts (replace `BACKEND_BASE_URL` with your deployed URL).
 
 ```js
-const backendBase = "https://<your-app>.azurewebsites.net";
+const backendBase = "https://th-2730cdd91ed4425fbfeef577240f9559.ecs.us-east-1.on.aws";
 const userId = "user@example.com";
 
 // 1) Create QR
@@ -420,31 +420,32 @@ ngrok http 8080
   - `GET /qr-status/:qrId` returns `paid: true`
   - `GET /transaction-status/:qrId` returns `status: paid`
 
-## Azure App Service Deployment (Node 20)
+## AWS ECS Deployment (Node 20)
 
-1. Configure app settings in Azure portal/App Service:
+1. Configure environment variables / secrets in the ECS task definition:
 
 - `NODE_ENV=production`
 - `PORT=8080`
-- `PUBLIC_BASE_URL=https://<your-app>.azurewebsites.net`
+- `PUBLIC_BASE_URL=https://th-2730cdd91ed4425fbfeef577240f9559.ecs.us-east-1.on.aws`
 - `RAZORPAY_KEY_ID=...`
 - `RAZORPAY_KEY_SECRET=...`
 - `RAZORPAY_WEBHOOK_SECRET=...`
-- `RAZORPAY_WEBHOOK_URL=https://<your-app>.azurewebsites.net/webhooks`
+- `RAZORPAY_WEBHOOK_URL=https://th-2730cdd91ed4425fbfeef577240f9559.ecs.us-east-1.on.aws/webhooks`
 - `SUPABASE_URL=...`
 - `SUPABASE_SERVICE_ROLE_KEY=...`
-- `CORS_ORIGINS=chrome-extension://<extension-id>,https://<your-app>.azurewebsites.net`
+- `CORS_ORIGINS=chrome-extension://<extension-id>,https://th-2730cdd91ed4425fbfeef577240f9559.ecs.us-east-1.on.aws`
 
-2. Deploy from backend folder:
+2. Build and push the image, then deploy (see `deploy/DEPLOYMENT.md`):
 
 ```bash
-zip -r deploy.zip . -x ".git/*" "node_modules/*" ".env"
-az webapp deploy --resource-group <rg> --name <app-name> --src-path deploy.zip --type zip
+docker build -t thinkpulse-backend .
+docker tag thinkpulse-backend:latest 478728045812.dkr.ecr.us-east-1.amazonaws.com/thinkpulse-backend:latest
+docker push 478728045812.dkr.ecr.us-east-1.amazonaws.com/thinkpulse-backend:latest
 ```
 
 3. Configure Razorpay webhook URL:
 
-- `https://<your-app>.azurewebsites.net/webhooks`
+- `https://th-2730cdd91ed4425fbfeef577240f9559.ecs.us-east-1.on.aws/webhooks`
 
 Select events:
 

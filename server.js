@@ -46,6 +46,10 @@ const {
 } = require("./src/security/webhook_security");
 
 const app = express();
+// Behind AWS App Runner / ALB / CloudFront the app receives requests through a
+// reverse proxy. Trusting the first proxy hop lets express-rate-limit and
+// req.ip read the real client IP from X-Forwarded-For instead of the proxy IP.
+app.set("trust proxy", 1);
 const port = Number(process.env.PORT || 8080);
 const globalIpRateLimiter = createGlobalIpRateLimiter();
 
@@ -653,8 +657,8 @@ app.post("/stripe/create-checkout-session", async (req, res) => {
   }
 });
 
-app.listen(port, () => {
-  console.log(`[backend] ThinkPulse backend listening on port ${port} in ${mode} mode`);
+app.listen(port, "0.0.0.0", () => {
+  console.log(`[backend] ThinkPulse backend listening on 0.0.0.0:${port} in ${mode} mode`);
   if (publicBaseUrl) {
     console.log(`[backend] PUBLIC_BASE_URL = ${publicBaseUrl}`);
   }

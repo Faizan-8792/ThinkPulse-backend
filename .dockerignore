@@ -1,0 +1,14 @@
+node_modules
+npm-debug.log
+.env
+.env.*
+.git
+.github
+*.md
+scripts/
+.vscode
+boot.log
+boot.err
+Dockerfile
+.dockerignore
+apprunner.yaml
