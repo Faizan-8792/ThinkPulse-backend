@@ -176,6 +176,39 @@ function getSystemProvider(service, provider) {
   return normalizeSystemProvider(safeService, safeProvider, safeProvider);
 }
 
+/**
+ * Reads the configured fallback chat route for `superior_llm`. Returns null
+ * when no fallback API key is configured. The fallback is used only when the
+ * primary upstream fails BEFORE streaming starts (auth/rate-limit/5xx/timeout),
+ * so the client never sees a half-streamed broken response.
+ *
+ * @returns {{provider:string, key:string, model:string, endpoint:string}|null}
+ */
+function getSuperiorLlmFallback() {
+  const key = normalizeApiKey(readEnvAny([
+    "SUPERIOR_LLM_FALLBACK_API_KEY",
+    "SUPERIOR_LLM_FALLBACK_API",
+    "SUPERIOR_LLM_FALLBACK_KEY"
+  ]));
+  if (!key) {
+    return null;
+  }
+  const provider = normalizeSystemProvider(
+    "chat",
+    readEnvAny(["SUPERIOR_LLM_FALLBACK_PROVIDER", "SUPERIOR_LLM_FALLBACK_TYPE"]),
+    "nvidia"
+  ) || "nvidia";
+  const model =
+    readEnvAny(["SUPERIOR_LLM_FALLBACK_MODEL"]) ||
+    DEFAULT_CHAT_MODELS[provider] ||
+    "nvidia/nemotron-3-ultra-550b-a55b";
+  const endpoint = sanitizeEndpoint(
+    readEnvAny(["SUPERIOR_LLM_FALLBACK_ENDPOINT"]),
+    DEFAULT_CHAT_ENDPOINTS[provider] || DEFAULT_CHAT_ENDPOINTS.nvidia
+  );
+  return { provider, key, model, endpoint };
+}
+
 function normalizeService(value) {
   const safe = String(value || "").trim().toLowerCase();
   if (safe === "web" || safe === "web-search" || safe === "web_search") {
@@ -431,6 +464,7 @@ function buildProviderProxyDiagnostics() {
   const superiorUpstreamKeyConfigured = superiorUpstreamProvider && superiorUpstreamProvider !== superiorProvider
     ? Boolean(getSystemApiKey("chat", superiorUpstreamProvider))
     : false;
+  const superiorFallback = getSuperiorLlmFallback();
   const ocrCapabilities = buildSystemApiCapabilities().ocrApis || [];
   return {
     version: PROVIDER_PROXY_VERSION,
@@ -442,7 +476,15 @@ function buildProviderProxyDiagnostics() {
         upstreamProvider: superiorUpstreamProvider,
         model: superiorModel,
         endpoint: superiorEndpoint,
-        deepSeekModel: isNvidiaDeepSeekModel(superiorModel)
+        deepSeekModel: isNvidiaDeepSeekModel(superiorModel),
+        fallback: superiorFallback
+          ? {
+              configured: true,
+              provider: superiorFallback.provider,
+              model: superiorFallback.model,
+              endpoint: superiorFallback.endpoint
+            }
+          : { configured: false }
       },
       nvidia: {
         keyConfigured: Boolean(getSystemApiKey("chat", "nvidia"))
@@ -849,10 +891,17 @@ function buildProviderHttpError(provider, response, detail) {
 async function fetchProviderResponse(endpoint, options, provider) {
   const safeProvider = normalizeProvider(provider);
   const attempts = safeProvider === "nvidia_deepseek" ? 3 : 1;
+  // NVIDIA NIM models (Nemotron / deepseek-v4) can be slow to first byte on
+  // cold starts or under load. Give them a much longer time-to-first-byte
+  // window than the 120s default so they are not cut off prematurely.
+  const providerTimeoutMs =
+    safeProvider === "nvidia" || safeProvider === "nvidia_deepseek" || safeProvider === "deepseek"
+      ? 300000
+      : 120000;
   let lastError = null;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      const response = await fetchWithProviderTimeout(endpoint, options);
+      const response = await fetchWithProviderTimeout(endpoint, options, providerTimeoutMs);
       if (!isRetriableProviderStatus(response.status) || attempt >= attempts) {
         return response;
       }
@@ -980,38 +1029,109 @@ async function proxyChat(req, res) {
 
   const isNvidiaDeepSeek = upstreamProvider === "nvidia_deepseek";
   const chatEndpoint = endpoint || DEFAULT_CHAT_ENDPOINTS[provider] || DEFAULT_CHAT_ENDPOINTS[upstreamProvider] || DEFAULT_CHAT_ENDPOINTS.openai;
-  const requestMessages = upstreamProvider === "deepseek" || isNvidiaDeepSeek ? textOnlyMessages(messages) : messages;
-  const stopHeartbeat = isNvidiaDeepSeek ? prepareSseResponse(res) : null;
-  try {
-    const response = await fetchProviderResponse(chatEndpoint, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${key}`,
-        "Content-Type": "application/json",
-        Accept: "text/event-stream",
-        "User-Agent": "OpenAI/JS FaizanAI-ThinkPulse",
-        ...(upstreamProvider === "openrouter" ? { "HTTP-Referer": "https://faizanai.app", "X-Title": "FaizanAI" } : {})
-      },
-      body: JSON.stringify({
-        model: model || DEFAULT_CHAT_MODELS[provider] || DEFAULT_CHAT_MODELS.openai,
-        messages: requestMessages,
-        stream: true,
-        max_tokens: isNvidiaDeepSeek ? 16384 : upstreamProvider === "deepseek" ? 2048 : 4096,
-        ...(isNvidiaDeepSeek ? {
-          temperature: 1,
-          top_p: 0.95,
-          chat_template_kwargs: {
-            thinking: Boolean(body.deepThink || body.thinking)
+  const wantsThinking = Boolean(body.deepThink || body.thinking);
+
+  // Builds the JSON body for one OpenAI-compatible upstream attempt.
+  const buildUpstreamBody = (attemptProvider, attemptModel) => {
+    const safeAttemptProvider = normalizeProvider(attemptProvider);
+    const attemptIsNvidiaDeepSeek = safeAttemptProvider === "nvidia_deepseek";
+    const attemptIsNvidia = safeAttemptProvider === "nvidia" || attemptIsNvidiaDeepSeek;
+    const attemptMessages =
+      safeAttemptProvider === "deepseek" || attemptIsNvidiaDeepSeek
+        ? textOnlyMessages(messages)
+        : messages;
+    return JSON.stringify({
+      model: attemptModel || DEFAULT_CHAT_MODELS[safeAttemptProvider] || DEFAULT_CHAT_MODELS.openai,
+      messages: attemptMessages,
+      stream: true,
+      max_tokens: attemptIsNvidiaDeepSeek ? 16384 : safeAttemptProvider === "deepseek" ? 2048 : 4096,
+      ...(attemptIsNvidiaDeepSeek
+        ? {
+            temperature: 1,
+            top_p: 0.95,
+            chat_template_kwargs: { thinking: wantsThinking }
           }
-        } : {})
-      })
-    }, upstreamProvider);
-    return await streamProviderResponse(response, upstreamProvider, res);
-  } finally {
-    if (typeof stopHeartbeat === "function") {
-      stopHeartbeat();
+        : attemptIsNvidia
+          ? {
+              temperature: 1,
+              top_p: 0.95,
+              chat_template_kwargs: { enable_thinking: wantsThinking }
+            }
+          : {})
+    });
+  };
+
+  const buildUpstreamHeaders = (attemptProvider, attemptKey) => ({
+    Authorization: `Bearer ${attemptKey}`,
+    "Content-Type": "application/json",
+    Accept: "text/event-stream",
+    "User-Agent": "OpenAI/JS FaizanAI-ThinkPulse",
+    ...(normalizeProvider(attemptProvider) === "openrouter"
+      ? { "HTTP-Referer": "https://faizanai.app", "X-Title": "FaizanAI" }
+      : {})
+  });
+
+  // Primary attempt definition, then optional fallback for superior_llm.
+  const attempts = [
+    {
+      provider: upstreamProvider,
+      key,
+      model: model || DEFAULT_CHAT_MODELS[provider] || DEFAULT_CHAT_MODELS.openai,
+      endpoint: chatEndpoint
+    }
+  ];
+
+  if (isSuperiorLlm) {
+    const fallback = getSuperiorLlmFallback();
+    // Only add the fallback when it points at a different upstream/key so we
+    // don't retry the exact same failing route.
+    if (fallback && (fallback.provider !== upstreamProvider || fallback.key !== key)) {
+      attempts.push({
+        provider: fallback.provider,
+        key: fallback.key,
+        model: fallback.model,
+        endpoint: resolveChatEndpoint(fallback.provider, fallback.endpoint, DEFAULT_CHAT_ENDPOINTS[fallback.provider])
+      });
     }
   }
+
+  let lastError = null;
+  for (let i = 0; i < attempts.length; i += 1) {
+    const attempt = attempts[i];
+    const attemptIsNvidiaDeepSeek = normalizeProvider(attempt.provider) === "nvidia_deepseek";
+    // Heartbeat only matters for slow NIM routes; keep prior behaviour.
+    const stopHeartbeat = attemptIsNvidiaDeepSeek ? prepareSseResponse(res) : null;
+    try {
+      const response = await fetchProviderResponse(
+        attempt.endpoint,
+        {
+          method: "POST",
+          headers: buildUpstreamHeaders(attempt.provider, attempt.key),
+          body: buildUpstreamBody(attempt.provider, attempt.model)
+        },
+        attempt.provider
+      );
+      // streamProviderResponse throws on !response.ok BEFORE writing the SSE
+      // body, so a failed primary can still fall through to the fallback as
+      // long as we have not started streaming yet.
+      return await streamProviderResponse(response, attempt.provider, res);
+    } catch (error) {
+      lastError = error;
+      const moreAttempts = i < attempts.length - 1;
+      // If the SSE stream already started, we cannot safely switch providers.
+      if (res.__providerProxySsePrepared || res.headersSent || !moreAttempts) {
+        throw error;
+      }
+      console.warn(
+        `[provider-proxy] superior_llm primary (${attempt.provider}) failed before stream; trying fallback. status=${error?.status || "n/a"}`
+      );
+    } finally {
+      if (typeof stopHeartbeat === "function") {
+        stopHeartbeat();
+      }
+    }
+  }
+  throw lastError || new Error("Chat provider request failed.");
 }
 
 async function proxyOcr(req, res) {
