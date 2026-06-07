@@ -34,6 +34,10 @@ const {
   DEFAULT_TOKEN_TTL_MS: DEMO_SESSION_DEFAULT_TTL_MS
 } = require("./src/security/demo_session");
 const {
+  requestEmailOtp,
+  verifyEmailOtp
+} = require("./src/security/email_otp");
+const {
   attachRequestContext,
   logSecurityEvent
 } = require("./src/security/logger");
@@ -595,6 +599,80 @@ app.post("/auth/demo-session", (req, res) => {
     res.status(500).json({
       ok: false,
       error: "Unable to issue demo session token."
+    });
+  }
+});
+
+/**
+ * Email OTP sign-in — request a one-time code.
+ *
+ * Accepts `{ email }`, generates a 6-digit code, emails it via Resend, and
+ * stores only an HMAC hash server-side. This is the passwordless replacement
+ * for Google OAuth sign-in.
+ */
+app.post("/auth/request-otp", async (req, res) => {
+  const email = String(req.body?.email || "").trim().toLowerCase();
+  const result = await requestEmailOtp(email);
+  if (!result.ok) {
+    res.status(result.status || 400).json({
+      ok: false,
+      error: result.error || "Unable to send verification code."
+    });
+    return;
+  }
+  res.json({
+    ok: true,
+    email: result.email,
+    expiresAt: result.expiresAt
+  });
+});
+
+/**
+ * Email OTP sign-in — verify the code and issue a session token.
+ *
+ * On success the caller receives the same signed session token used by the
+ * legacy demo-session path, so every downstream backend feature (user
+ * registry, rewards, billing, account status) works identically to the
+ * previous Google-authenticated flow.
+ */
+app.post("/auth/verify-otp", (req, res) => {
+  const email = String(req.body?.email || "").trim().toLowerCase();
+  const code = String(req.body?.code || "").trim();
+  const verification = verifyEmailOtp(email, code);
+  if (!verification.ok) {
+    logSecurityEvent("email_otp_rejected", {
+      claimedEmail: email
+    }, "warn");
+    res.status(verification.status || 401).json({
+      ok: false,
+      error: verification.error || "Invalid verification code."
+    });
+    return;
+  }
+
+  try {
+    const session = issueDemoSessionToken(verification.email, {
+      ttlMs: DEMO_SESSION_DEFAULT_TTL_MS
+    });
+    res.json({
+      ok: true,
+      token: session.token,
+      tokenType: "demo",
+      expiresAt: session.expiresAt,
+      issuedAt: session.issuedAt,
+      auth: {
+        email: verification.email,
+        role: "user"
+      }
+    });
+  } catch (error) {
+    logSecurityEvent("email_otp_session_issue_failed", {
+      claimedEmail: email,
+      reason: error?.message || "unknown_error"
+    }, "warn");
+    res.status(500).json({
+      ok: false,
+      error: "Unable to issue session token."
     });
   }
 });
