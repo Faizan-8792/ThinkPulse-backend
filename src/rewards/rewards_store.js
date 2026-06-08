@@ -674,6 +674,7 @@ async function getRewardDashboard(email) {
     joiningBonusPaise: JOINING_BONUS_PAISE,
     updatedAt: now
   };
+  const bonusProfileIsNew = !store.bonusProfiles[safeEmail];
   store.bonusProfiles[safeEmail] = bonusProfile;
 
   const promoCodes = Object.values(store.promos)
@@ -736,7 +737,12 @@ async function getRewardDashboard(email) {
     })
     .slice(0, 40);
 
-  await persistStore();
+  // Only persist when this read actually created a new bonus profile.
+  // Dashboard is polled every ~12s per user; persisting on every read added a
+  // Supabase round-trip to each poll and slowed balance reflection.
+  if (bonusProfileIsNew) {
+    await persistStore();
+  }
 
   // Determine joining bonus state using multiple sources of truth:
   // 1. bonusProfiles[email].joiningClaimedAt (primary, but can be lost on redeploy)

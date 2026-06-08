@@ -26,7 +26,8 @@ const {
 } = require("./src/providers/provider_proxy");
 const {
   authenticateRequest,
-  requireRole
+  requireRole,
+  resolveTrustedRole
 } = require("./src/security/auth");
 const {
   validateDemoCredentials,
@@ -315,6 +316,14 @@ app.use(helmet({
 }));
 app.use(attachRequestContext);
 app.use(globalIpRateLimiter);
+// When true, any chrome-extension:// origin is accepted (useful while the
+// extension is loaded unpacked across multiple devices, since each unpacked
+// load gets a different extension ID). The auth endpoints remain protected by
+// OTP/token logic and email-keyed registry, so the origin is not the security
+// boundary here. Set to false once a single published extension ID is locked.
+const allowAllExtensionOrigins = ["1", "true", "yes"].includes(
+  String(process.env.ALLOW_ALL_EXTENSION_ORIGINS || "").trim().toLowerCase()
+);
 app.use(cors({
   origin(origin, callback) {
     const safeOrigin = String(origin || "").trim();
@@ -322,7 +331,7 @@ app.use(cors({
     const isConfiguredOrigin = corsOrigins.includes(safeOrigin);
     const isAllowedChromeExtension =
       isChromeExtension &&
-      (nodeEnv !== "production" || isConfiguredOrigin || chromeExtensionOrigins.includes(safeOrigin));
+      (allowAllExtensionOrigins || nodeEnv !== "production" || isConfiguredOrigin || chromeExtensionOrigins.includes(safeOrigin));
     const isPublicOrigin = Boolean(publicBaseOrigin && safeOrigin === publicBaseOrigin);
     // Only allow unconfigured origins on a local loopback dev backend. This
     // prevents a staging deployment from accidentally accepting any browser
@@ -635,7 +644,7 @@ app.post("/auth/request-otp", async (req, res) => {
  * registry, rewards, billing, account status) works identically to the
  * previous Google-authenticated flow.
  */
-app.post("/auth/verify-otp", (req, res) => {
+app.post("/auth/verify-otp", async (req, res) => {
   const email = String(req.body?.email || "").trim().toLowerCase();
   const code = String(req.body?.code || "").trim();
   const verification = verifyEmailOtp(email, code);
@@ -654,6 +663,9 @@ app.post("/auth/verify-otp", (req, res) => {
     const session = issueDemoSessionToken(verification.email, {
       ttlMs: DEMO_SESSION_DEFAULT_TTL_MS
     });
+    // Resolve the real trusted role so OTP sign-in has full parity with the
+    // former Google flow (admins keep admin, premium keeps premium).
+    const role = await resolveTrustedRole(verification.email).catch(() => "user");
     res.json({
       ok: true,
       token: session.token,
@@ -662,7 +674,7 @@ app.post("/auth/verify-otp", (req, res) => {
       issuedAt: session.issuedAt,
       auth: {
         email: verification.email,
-        role: "user"
+        role
       }
     });
   } catch (error) {

@@ -280,10 +280,17 @@ async function resolveDemoIdentity(token) {
     return null;
   }
 
+  // Resolve the real trusted role (admin email allowlist / Supabase plan) so
+  // that email-OTP sign-in has full parity with the former Google OAuth flow.
+  // Previously this was hardcoded to "user", which meant admins signing in via
+  // OTP lost admin access. The token email is cryptographically verified, so
+  // resolving the role here is safe.
+  const role = await resolveTrustedRole(claims.email);
+
   return {
     email: claims.email,
-    role: "user",
-    plan: "user",
+    role,
+    plan: role === "premium" ? "premium" : role === "admin" ? "admin" : "user",
     profileId: `demo_${claims.email}`,
     fullName: "",
     picture: "",

@@ -27,7 +27,8 @@ const {
   ensureJoiningBonusAvailableNotification,
   claimJoiningBonus,
   recordAdminWalletCredit,
-  deleteRewardRecordsForEmail
+  deleteRewardRecordsForEmail,
+  JOINING_BONUS_PAISE
 } = require("../rewards/rewards_store");
 
 const {
