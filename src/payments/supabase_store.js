@@ -30,6 +30,64 @@ function isConfigured() {
   return Boolean(supabaseClient);
 }
 
+// ─── Plan-state probe memoization + short-lived cache ───────────────────────
+// getUserPlanState probes several (table, column) combinations until one
+// works. On deployments whose schema has no users/profiles table, every probe
+// fails with a schema error — adding 6 sequential Supabase round-trips to each
+// call, and the function is invoked many times per request (admin checks,
+// billing, role resolution). We:
+//   1. remember which (table.column) probes returned a schema error and skip
+//      them on subsequent calls (schema does not change at runtime), and
+//   2. cache the resolved plan per userId for a few seconds.
+// Both are process-local and self-correct: the cache expires and the dead-set
+// only ever holds probes the DB itself rejected as nonexistent.
+const PLAN_STATE_ATTEMPTS = [
+  { table: "users", column: "id" },
+  { table: "users", column: "user_id" },
+  { table: "users", column: "email" },
+  { table: "profiles", column: "id" },
+  { table: "profiles", column: "user_id" },
+  { table: "profiles", column: "email" }
+];
+const planStateDeadProbes = new Set();
+const planStateCache = new Map();
+const PLAN_STATE_CACHE_TTL_MS = 5000;
+const PLAN_STATE_CACHE_MAX = 5000;
+
+function readPlanStateCache(userId) {
+  const entry = planStateCache.get(userId);
+  if (!entry) {
+    return null;
+  }
+  if (Date.now() - entry.at > PLAN_STATE_CACHE_TTL_MS) {
+    planStateCache.delete(userId);
+    return null;
+  }
+  return entry.value;
+}
+
+function writePlanStateCache(userId, value) {
+  if (planStateCache.size >= PLAN_STATE_CACHE_MAX) {
+    const oldestKey = planStateCache.keys().next().value;
+    if (oldestKey !== undefined) {
+      planStateCache.delete(oldestKey);
+    }
+  }
+  planStateCache.set(userId, { value, at: Date.now() });
+}
+
+/**
+ * Invalidates the cached plan-state for one user. Call after a plan write so
+ * the next read reflects the change immediately rather than waiting for TTL.
+ * @param {string} userId
+ */
+function invalidatePlanStateCache(userId) {
+  const safeUserId = normalizeUserId(userId);
+  if (safeUserId) {
+    planStateCache.delete(safeUserId);
+  }
+}
+
 /**
  * Returns true when error indicates schema/table mismatch.
  * @param {any} error
@@ -767,6 +825,9 @@ async function setUserPlanState(payload) {
 
   const plan = String(payload?.plan || "basic").trim().toLowerCase();
   const nowIso = new Date().toISOString();
+  // Plan is changing — drop any cached read so the next getUserPlanState
+  // reflects the new value immediately instead of serving a stale TTL entry.
+  invalidatePlanStateCache(userId);
   const updateVariants = [
     {
       plan,
@@ -853,16 +914,23 @@ async function getUserPlanState(payload) {
     };
   }
 
-  const attempts = [
-    { table: "users", column: "id" },
-    { table: "users", column: "user_id" },
-    { table: "users", column: "email" },
-    { table: "profiles", column: "id" },
-    { table: "profiles", column: "user_id" },
-    { table: "profiles", column: "email" }
-  ];
+  const cached = readPlanStateCache(userId);
+  if (cached) {
+    return cached;
+  }
 
-  for (const attempt of attempts) {
+  let result = {
+    found: false,
+    reason: "No matching users/profiles row found for this user identifier."
+  };
+
+  for (const attempt of PLAN_STATE_ATTEMPTS) {
+    const probeKey = `${attempt.table}.${attempt.column}`;
+    // Skip probes the DB already rejected as nonexistent this process lifetime.
+    if (planStateDeadProbes.has(probeKey)) {
+      continue;
+    }
+
     const { data: rows, error } = await supabaseClient
       .from(attempt.table)
       .select("plan")
@@ -871,8 +939,10 @@ async function getUserPlanState(payload) {
 
     if (error) {
       if (isSchemaError(error)) {
+        planStateDeadProbes.add(probeKey);
         continue;
       }
+      // Transient error: return without caching so the next call retries.
       return {
         found: false,
         reason: error.message || "Unable to read user plan state."
@@ -882,19 +952,18 @@ async function getUserPlanState(payload) {
     const row = Array.isArray(rows) && rows.length ? rows[0] : null;
     const plan = String(row?.plan || "").trim().toLowerCase();
     if (plan) {
-      return {
+      result = {
         found: true,
         plan,
         table: attempt.table,
         column: attempt.column
       };
+      break;
     }
   }
 
-  return {
-    found: false,
-    reason: "No matching users/profiles row found for this user identifier."
-  };
+  writePlanStateCache(userId, result);
+  return result;
 }
 
 /**
@@ -1135,6 +1204,7 @@ module.exports = {
   markUserAsPaid,
   setUserPlanState,
   getUserPlanState,
+  invalidatePlanStateCache,
   getUserRegistryRecord,
   getUserPaymentPresence,
   upsertUserRegistryRecord,
