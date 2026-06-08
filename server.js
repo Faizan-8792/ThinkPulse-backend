@@ -224,13 +224,6 @@ const corsOrigins = String(process.env.CORS_ORIGINS || "")
   .split(",")
   .map((item) => item.trim())
   .filter(Boolean);
-const chromeExtensionOrigins = [
-  // Hardcoded published extension ID so CORS works immediately without
-  // requiring CHROME_EXTENSION_ORIGINS to be set in Azure App Settings.
-  // Once you configure the env var, this fallback is harmless (deduped).
-  "chrome-extension://blpflnaplofjigoilfedffpjcmpijjgm",
-  ...parseEnvList("CHROME_EXTENSION_ORIGINS", 50)
-].filter((item) => item.startsWith("chrome-extension://"));
 
 /**
  * Validates runtime environment for payment and webhook flows.
@@ -283,13 +276,7 @@ function validateRuntimeConfig() {
   }
 
   if (nodeEnv === "production" && corsOrigins.length === 0) {
-    warnings.push("CORS_ORIGINS is empty in production. Browser web origins will be limited to PUBLIC_BASE_URL and Chrome extension origins.");
-  }
-  if (
-    nodeEnv === "production" &&
-    ![...corsOrigins, ...chromeExtensionOrigins].some((item) => item.startsWith("chrome-extension://"))
-  ) {
-    warnings.push("Configure the published extension origin in CORS_ORIGINS or CHROME_EXTENSION_ORIGINS before Chrome Web Store release.");
+    warnings.push("CORS_ORIGINS is empty in production. Browser web origins will be limited to PUBLIC_BASE_URL. All chrome-extension:// origins are always accepted (token-authenticated), so the unpacked extension works regardless of its ID.");
   }
 
   return {
@@ -316,29 +303,24 @@ app.use(helmet({
 }));
 app.use(attachRequestContext);
 app.use(globalIpRateLimiter);
-// When true, any chrome-extension:// origin is accepted (useful while the
-// extension is loaded unpacked across multiple devices, since each unpacked
-// load gets a different extension ID). The auth endpoints remain protected by
-// OTP/token logic and email-keyed registry, so the origin is not the security
-// boundary here. Set to false once a single published extension ID is locked.
-const allowAllExtensionOrigins = ["1", "true", "yes"].includes(
-  String(process.env.ALLOW_ALL_EXTENSION_ORIGINS || "").trim().toLowerCase()
-);
+// Any chrome-extension:// origin is always trusted by CORS. The extension is
+// loaded unpacked across multiple devices, so its ID (and therefore its
+// origin) changes per install — pinning a single ID would break those loads.
+// CORS is NOT the security boundary here: every protected endpoint requires a
+// verified Bearer/OTP session token and is keyed by the authenticated email,
+// so an arbitrary extension origin cannot act on another user's data.
 app.use(cors({
   origin(origin, callback) {
     const safeOrigin = String(origin || "").trim();
     const isChromeExtension = safeOrigin.startsWith("chrome-extension://");
     const isConfiguredOrigin = corsOrigins.includes(safeOrigin);
-    const isAllowedChromeExtension =
-      isChromeExtension &&
-      (allowAllExtensionOrigins || nodeEnv !== "production" || isConfiguredOrigin || chromeExtensionOrigins.includes(safeOrigin));
     const isPublicOrigin = Boolean(publicBaseOrigin && safeOrigin === publicBaseOrigin);
-    // Only allow unconfigured origins on a local loopback dev backend. This
+    // Only allow unconfigured web origins on a local loopback dev backend. This
     // prevents a staging deployment from accidentally accepting any browser
     // origin if CORS_ORIGINS was forgotten.
     const isLoopbackOrigin = /^(?:https?:)?\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i.test(safeOrigin);
     const isOpenDevCors = nodeEnv !== "production" && corsOrigins.length === 0 && (!safeOrigin || isLoopbackOrigin);
-    if (!safeOrigin || isConfiguredOrigin || isPublicOrigin || isAllowedChromeExtension || isOpenDevCors) {
+    if (!safeOrigin || isChromeExtension || isConfiguredOrigin || isPublicOrigin || isOpenDevCors) {
       callback(null, true);
       return;
     }
