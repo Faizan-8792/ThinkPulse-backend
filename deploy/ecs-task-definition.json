@@ -25,7 +25,7 @@
         { "name": "NODE_ENV", "value": "production" },
         { "name": "MODE", "value": "live" },
         { "name": "PORT", "value": "8080" },
-        { "name": "PUBLIC_BASE_URL", "value": "REPLACE_WITH_PUBLIC_URL" },
+        { "name": "PUBLIC_BASE_URL", "value": "https://th-2730cdd91ed4425fbfeef577240f9559.ecs.us-east-1.on.aws" },
         { "name": "CORS_ORIGINS", "value": "chrome-extension://blpflnaplofjigoilfedffpjcmpijjgm" },
         { "name": "CHROME_EXTENSION_ORIGINS", "value": "chrome-extension://blpflnaplofjigoilfedffpjcmpijjgm" },
         { "name": "STRIPE_STATEMENT_DESCRIPTOR", "value": "THINKPULSE" },
