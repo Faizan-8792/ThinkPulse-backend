@@ -193,6 +193,13 @@ const GLOBAL_JSON_CONFIG_KEY_MAX_LENGTH = 240;
 const PAYMENT_CONFIG_ROW_PREFIX = "global_config:";
 const PAYMENT_CONFIG_USER_ID = "__global_config__";
 
+// Memoize which global-config (table.keyColumn.valueColumn) probes the DB
+// rejects as nonexistent so we stop re-issuing failing round-trips. This is
+// the hottest read path (account status is checked on every authenticated
+// request, and the rewards/wallet stores load through it), so on a schema that
+// only has the payments-table fallback the 4 leading probes were pure latency.
+const globalJsonConfigDeadProbes = new Set();
+
 const USER_STATE_NAMESPACE_ALLOWLIST = new Set([
   "billing",
   "account",
@@ -445,6 +452,10 @@ async function getGlobalJsonConfig(settingKey) {
   }
 
   for (const attempt of GLOBAL_JSON_CONFIG_ATTEMPTS) {
+    const probeKey = `${attempt.table}.${attempt.keyColumn}.${attempt.valueColumn}`;
+    if (globalJsonConfigDeadProbes.has(probeKey)) {
+      continue;
+    }
     const selectColumns = `${attempt.keyColumn},${attempt.valueColumn}`;
     const { data: rows, error } = await supabaseClient
       .from(attempt.table)
@@ -454,6 +465,7 @@ async function getGlobalJsonConfig(settingKey) {
 
     if (error) {
       if (isSchemaError(error)) {
+        globalJsonConfigDeadProbes.add(probeKey);
         continue;
       }
       return {
@@ -504,6 +516,10 @@ async function upsertGlobalJsonConfig(settingKey, value) {
 
   const safeValue = value && typeof value === "object" ? value : {};
   for (const attempt of GLOBAL_JSON_CONFIG_ATTEMPTS) {
+    const probeKey = `${attempt.table}.${attempt.keyColumn}.${attempt.valueColumn}`;
+    if (globalJsonConfigDeadProbes.has(probeKey)) {
+      continue;
+    }
     const rowPayload = {
       [attempt.keyColumn]: safeKey,
       [attempt.valueColumn]: safeValue
@@ -522,6 +538,7 @@ async function upsertGlobalJsonConfig(settingKey, value) {
 
     if (error) {
       if (isSchemaError(error)) {
+        globalJsonConfigDeadProbes.add(probeKey);
         continue;
       }
       throw new Error(error.message || "Unable to upsert global JSON config.");
