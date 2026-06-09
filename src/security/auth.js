@@ -61,6 +61,31 @@ const tokenValidationCache = new InMemoryTtlStore({
 });
 
 /**
+ * Short-lived cache of per-user account status (active/blocked/deleted).
+ * Without this, every non-admin API call (every chat message) does a Supabase
+ * read for the status row, which dominates latency and collapses throughput
+ * under concurrency. TTL is short so an admin block/delete still propagates
+ * quickly; writes also invalidate it explicitly.
+ */
+const accountStatusCache = new InMemoryTtlStore({
+  maxEntries: 8000,
+  sweepIntervalMs: 60000
+});
+const ACCOUNT_STATUS_CACHE_TTL_MS = 5 * 1000;
+
+/**
+ * Drops the cached account status for one email so the next request re-reads
+ * it from Supabase. Called after admin block/unblock/delete writes.
+ * @param {string} email
+ */
+function invalidateAccountStatusCache(email) {
+  const safeEmail = normalizeEmail(email);
+  if (safeEmail) {
+    accountStatusCache.delete(safeEmail);
+  }
+}
+
+/**
  * Parses the THINKPULSE_ADMIN_EMAILS and ADMIN_EMAILS environment variables
  * into a deduplicated array of normalised email strings. Supports both
  * comma-separated and newline-separated values.
@@ -190,9 +215,16 @@ async function getAccountStatusForAuth(email) {
     return normalizeAccountStatusRecord("");
   }
 
+  const cached = accountStatusCache.get(safeEmail);
+  if (cached) {
+    return cached;
+  }
+
   try {
     const stored = await getGlobalJsonConfig(`${USER_ACCOUNT_STATUS_SETTING_PREFIX}${safeEmail}`);
-    return normalizeAccountStatusRecord(safeEmail, stored?.found ? stored.value : null);
+    const record = normalizeAccountStatusRecord(safeEmail, stored?.found ? stored.value : null);
+    accountStatusCache.set(safeEmail, record, ACCOUNT_STATUS_CACHE_TTL_MS);
+    return record;
   } catch (_error) {
     return normalizeAccountStatusRecord(safeEmail);
   }
@@ -492,5 +524,6 @@ module.exports = {
   resolveTrustedRole,
   normalizeEmail,
   invalidateAuthCacheForEmail,
+  invalidateAccountStatusCache,
   invalidateAuthCacheForToken
 };

@@ -36,7 +36,8 @@ const {
   requireRole,
   requireSelfOrAdmin,
   resolveTrustedRole,
-  invalidateAuthCacheForEmail
+  invalidateAuthCacheForEmail,
+  invalidateAccountStatusCache
 } = require("../security/auth");
 const {
   createIdempotencyMiddleware
@@ -205,6 +206,9 @@ async function saveUserAccountStatus(email, patch = {}) {
     updatedAt: now
   });
   const stored = await upsertGlobalJsonConfig(key, record);
+  // Drop the cached status so an admin block/unblock/delete takes effect on
+  // the next request instead of waiting for the short TTL to expire.
+  invalidateAccountStatusCache(safeEmail);
   return {
     ...stored,
     status: record
