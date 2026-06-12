@@ -32,6 +32,7 @@ const {
 const {
   validateDemoCredentials,
   issueDemoSessionToken,
+  refreshDemoSessionToken,
   DEFAULT_TOKEN_TTL_MS: DEMO_SESSION_DEFAULT_TTL_MS
 } = require("./src/security/demo_session");
 const {
@@ -669,6 +670,50 @@ app.post("/auth/verify-otp", async (req, res) => {
       error: "Unable to issue session token."
     });
   }
+});
+
+/**
+ * Silent session renewal — re-issues a fresh session token from an existing
+ * one without requiring the user to enter a new OTP. The client calls this
+ * proactively before expiry (and reactively on a 401) so an active user is
+ * never forced to sign in again. Accepts the current token via the
+ * Authorization: Bearer header. The token's signature must be valid and it
+ * must have been issued within the refresh grace window; it may itself be
+ * expired so a returning user can still renew.
+ */
+app.post("/auth/refresh-session", async (req, res) => {
+  const raw = String(req.headers.authorization || "").trim();
+  const token = /^bearer\s+/i.test(raw) ? raw.replace(/^bearer\s+/i, "").trim() : "";
+  if (!token) {
+    res.status(401).json({ ok: false, error: "Missing session token." });
+    return;
+  }
+
+  let refreshed;
+  try {
+    refreshed = refreshDemoSessionToken(token, { ttlMs: DEMO_SESSION_DEFAULT_TTL_MS });
+  } catch (_error) {
+    refreshed = null;
+  }
+
+  if (!refreshed) {
+    logSecurityEvent("session_refresh_rejected", {}, "warn");
+    res.status(401).json({ ok: false, error: "Session cannot be refreshed. Please sign in again." });
+    return;
+  }
+
+  const role = await resolveTrustedRole(refreshed.email).catch(() => "user");
+  res.json({
+    ok: true,
+    token: refreshed.token,
+    tokenType: "demo",
+    expiresAt: refreshed.expiresAt,
+    issuedAt: refreshed.issuedAt,
+    auth: {
+      email: refreshed.email,
+      role
+    }
+  });
 });
 
 app.use("/", usersRouter);

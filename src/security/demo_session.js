@@ -22,7 +22,15 @@ const crypto = require("crypto");
 // ─── Configuration ────────────────────────────────────────────────────────────
 
 /** Default lifetime for issued demo tokens. */
-const DEFAULT_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const DEFAULT_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+/**
+ * Maximum age (from original issuance) for which an expired token may still be
+ * silently refreshed into a fresh one. As long as a client refreshes within
+ * this window, the session effectively never forces a manual re-login. After
+ * this window the user must sign in again.
+ */
+const REFRESH_GRACE_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
 
 /**
  * Hardcoded fallback demo accounts.
@@ -222,13 +230,14 @@ function issueDemoSessionToken(email, options = {}) {
 }
 
 /**
- * Verifies a demo session token and returns the embedded identity.
- * Returns `null` if the token is malformed, expired, or fails HMAC checks.
+ * Parses a demo token and verifies its HMAC signature WITHOUT enforcing
+ * expiry. Returns the embedded claims or `null` when the token is malformed
+ * or the signature does not match. Expiry must be enforced by the caller.
  *
  * @param {string} token
  * @returns {{email:string,issuedAt:number,expiresAt:number}|null}
  */
-function verifyDemoSessionToken(token) {
+function parseSignedDemoToken(token) {
   const raw = String(token || "").trim();
   if (!raw.startsWith("demo:v1:")) {
     return null;
@@ -267,11 +276,50 @@ function verifyDemoSessionToken(token) {
   if (!safeEmail || !safeEmail.includes("@") || !expiresAt) {
     return null;
   }
-  if (Date.now() >= expiresAt) {
-    return null;
-  }
 
   return { email: safeEmail, issuedAt, expiresAt };
+}
+
+/**
+ * Verifies a demo session token and returns the embedded identity.
+ * Returns `null` if the token is malformed, expired, or fails HMAC checks.
+ *
+ * @param {string} token
+ * @returns {{email:string,issuedAt:number,expiresAt:number}|null}
+ */
+function verifyDemoSessionToken(token) {
+  const claims = parseSignedDemoToken(token);
+  if (!claims) {
+    return null;
+  }
+  if (Date.now() >= claims.expiresAt) {
+    return null;
+  }
+  return claims;
+}
+
+/**
+ * Re-issues a fresh demo session token from an existing one. The supplied
+ * token must have a valid signature and must have been originally issued
+ * within `REFRESH_GRACE_MS` — it may itself be expired (so a returning user
+ * whose 30-day token lapsed can still renew silently without re-entering an
+ * OTP). Returns `null` when the token is invalid or too old to refresh.
+ *
+ * @param {string} token
+ * @param {{ttlMs?:number}} options
+ * @returns {{token:string,expiresAt:number,issuedAt:number,email:string}|null}
+ */
+function refreshDemoSessionToken(token, options = {}) {
+  const claims = parseSignedDemoToken(token);
+  if (!claims) {
+    return null;
+  }
+  const originIat = claims.issuedAt || claims.expiresAt - DEFAULT_TOKEN_TTL_MS;
+  if (originIat > 0 && Date.now() - originIat > REFRESH_GRACE_MS) {
+    return null;
+  }
+  const issued = issueDemoSessionToken(claims.email, options);
+  return { ...issued, email: claims.email };
 }
 
 /**
@@ -290,6 +338,7 @@ module.exports = {
   validateDemoCredentials,
   issueDemoSessionToken,
   verifyDemoSessionToken,
+  refreshDemoSessionToken,
   looksLikeDemoSessionToken,
   DEFAULT_TOKEN_TTL_MS
 };
